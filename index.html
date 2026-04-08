@@ -80,8 +80,21 @@
             });
           });
         }
-        // 画面を再描画
-        if(typeof initAll === 'function') initAll();
+        // Firebase同期後の再描画（currentStaffを維持）
+        if(typeof rebuildStaffSelect === 'function'){
+          document.getElementById('month-label').textContent=year+'年 '+month+'月';
+          const lt=document.getElementById('logo-text');
+          if(lt)lt.innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
+          STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0};});
+          if(!tochoDays[month])tochoDays[month]=new Set();
+          ensureSchedule(month);
+          rebuildStaffSelect();
+          renderStaffCal();renderSummary();renderYkCard();renderICS();
+          const ct=document.getElementById('cfg-title');if(ct)ct.value=cfg.title;
+          const ca=document.getElementById('cfg-auto-ake');if(ca)ca.checked=cfg.autoAke!==false;
+          const cw=document.getElementById('cfg-wish-limit');if(cw)cw.value=cfg.wishLimit||6;
+          const cd=document.getElementById('cfg-wish-day-limit');if(cd)cd.value=cfg.wishDayLimit||2;
+        }
       } catch(e) { console.error('データ反映エラー:', e); }
     });
   };
@@ -758,7 +771,9 @@ function changeMonth(dir){
 function rebuildStaffSelect(){
   const sel=document.getElementById('stf-sel');sel.innerHTML='';
   STAFF.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});
-  currentStaff=STAFF[0]||'';sel.value=currentStaff;
+  // すでに選択中のスタッフがSTAFFリストに存在すれば維持、なければ先頭に
+  if(currentStaff && STAFF.includes(currentStaff)){sel.value=currentStaff;}
+  else{currentStaff=STAFF[0]||'';sel.value=currentStaff;}
 }
 function onStaffChange(){currentStaff=document.getElementById('stf-sel').value;selectedDay=null;kibouSelected=null;hideDetail();renderStaffCal();renderSummary();renderYkCard();}
 function setMode(m){
