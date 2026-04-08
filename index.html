@@ -7,7 +7,7 @@
 <!-- Firebase SDK -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
   import { getDatabase, ref, set, get, onValue }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
@@ -30,13 +30,15 @@
   // ── Googleログイン ──
   window._fbSignIn = async () => {
     try {
-      const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-      if(isIOS){
-        await signInWithRedirect(auth, provider);
-      } else {
-        await signInWithPopup(auth, provider);
+      provider.setCustomParameters({ prompt: 'select_account' });
+      await signInWithPopup(auth, provider);
+    } catch(e) {
+      if(e.code === 'auth/popup-blocked'){
+        alert('ポップアップがブロックされています。\nSafariの設定→このWebサイトの設定→ポップアップを「許可」にしてください。');
+      } else if(e.code !== 'auth/popup-closed-by-user'){
+        alert('ログインに失敗しました: ' + e.message);
       }
-    } catch(e) { alert('ログインに失敗しました: ' + e.message); }
+    }
   };
   window._fbSignOut = async () => {
     if(confirm('ログアウトしますか？')) await signOut(auth);
@@ -105,17 +107,11 @@
     });
   };
 
-  // ── リダイレクト結果の受け取り（iOS Safari対応）──
-  getRedirectResult(auth).catch(e => {
-    if(e.code !== 'auth/no-current-user') console.error('リダイレクトログインエラー:', e);
-  });
-
   // ── 認証状態の監視 ──
   onAuthStateChanged(auth, (user) => {
     const overlay = document.getElementById('login-overlay');
     const userInfo = document.getElementById('user-info');
     if(user) {
-      // ログイン済み → オーバーレイ非表示
       if(overlay) overlay.style.display = 'none';
       if(userInfo) {
         userInfo.innerHTML = `
@@ -123,10 +119,8 @@
           <span style="font-size:12px;color:var(--text2)">${user.displayName||user.email}</span>
           <button class="btn" style="margin-left:8px;padding:4px 10px;min-height:0;font-size:11px" onclick="_fbSignOut()">ログアウト</button>`;
       }
-      // リアルタイム同期開始
       window._fbStartSync();
     } else {
-      // 未ログイン → オーバーレイ表示
       if(overlay) overlay.style.display = 'flex';
       if(userInfo) userInfo.innerHTML = '';
     }
@@ -403,6 +397,18 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
     <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" style="width:20px;height:20px">
     Googleでログイン
   </button>
+  <div id="safari-hint" style="display:none;font-size:11px;color:#b45309;background:#fef9c3;border-radius:6px;padding:10px 14px;max-width:300px;text-align:left;line-height:1.7">
+    📌 <strong>iPhoneをご利用の方へ</strong><br>
+    ポップアップがブロックされた場合は<br>
+    Safari設定 → このWebサイトの設定<br>
+    →「ポップアップ」を<strong>許可</strong>にしてください
+  </div>
+  <script>
+    // iPhoneの場合だけSafari案内を表示
+    if(/iP(hone|ad|od)/.test(navigator.userAgent)){
+      document.getElementById('safari-hint').style.display='block';
+    }
+  </script>
 </div>
 
 <header class="hdr">
