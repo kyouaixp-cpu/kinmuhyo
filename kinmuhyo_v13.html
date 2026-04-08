@@ -1,0 +1,1635 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>勤務表</title>
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import { getDatabase, ref, set, get, onValue }
+    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAqdxQ-o7X7HYdbjfIJ--v7GFKw0BdjXSI",
+    authDomain: "kinmuhyo-3d310.firebaseapp.com",
+    databaseURL: "https://kinmuhyo-3d310-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "kinmuhyo-3d310",
+    storageBucket: "kinmuhyo-3d310.firebasestorage.app",
+    messagingSenderId: "46587529741",
+    appId: "1:46587529741:web:c1a40fc6eab8a8889ca344"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getDatabase(app);
+  const provider = new GoogleAuthProvider();
+
+  // ── Googleログイン ──
+  window._fbSignIn = async () => {
+    try { await signInWithPopup(auth, provider); }
+    catch(e) { alert('ログインに失敗しました: ' + e.message); }
+  };
+  window._fbSignOut = async () => {
+    if(confirm('ログアウトしますか？')) await signOut(auth);
+  };
+
+  // ── Firebase 保存 ──
+  window._fbSave = async (payload) => {
+    const uid = auth.currentUser?.uid;
+    if(!uid) return;
+    try {
+      await set(ref(db, 'kinmuhyo/shared'), payload);
+    } catch(e) { console.error('Firebase保存エラー:', e); }
+  };
+
+  // ── Firebase 読み込み（リアルタイム同期） ──
+  let _fbListenerAttached = false;
+  window._fbStartSync = () => {
+    if(_fbListenerAttached) return;
+    _fbListenerAttached = true;
+    onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
+      const data = snapshot.val();
+      if(!data) return;
+      // アプリ側のグローバル変数に反映
+      try {
+        if(data.cfg) cfg = data.cfg;
+        if(data.STAFF) STAFF = data.STAFF;
+        if(data.SHIFTS) SHIFTS = data.SHIFTS;
+        if(data.GROUPS) GROUPS = data.GROUPS;
+        if(data.shukyuKijun) shukyuKijun = data.shukyuKijun;
+        if(data.tochoDays){
+          tochoDays = {};
+          Object.entries(data.tochoDays).forEach(([m,a]) => { tochoDays[m] = new Set(a); });
+        }
+        if(data.nenkyuData) nenkyuData = data.nenkyuData;
+        if(data.schedData) schedData = data.schedData;
+        if(data.year) year = data.year;
+        if(data.month) month = data.month;
+        if(data.staffData){
+          staffData = {};
+          Object.entries(data.staffData).forEach(([n,mv]) => {
+            staffData[n] = {};
+            Object.entries(mv).forEach(([mo,dv]) => {
+              staffData[n][mo] = {};
+              Object.entries(dv).forEach(([d,v]) => {
+                staffData[n][mo][d] = {...v, ng: new Set(v.ng||[])};
+              });
+            });
+          });
+        }
+        // 画面を再描画
+        if(typeof initAll === 'function') initAll();
+      } catch(e) { console.error('データ反映エラー:', e); }
+    });
+  };
+
+  // ── 認証状態の監視 ──
+  onAuthStateChanged(auth, (user) => {
+    const overlay = document.getElementById('login-overlay');
+    const userInfo = document.getElementById('user-info');
+    if(user) {
+      // ログイン済み → オーバーレイ非表示
+      if(overlay) overlay.style.display = 'none';
+      if(userInfo) {
+        userInfo.innerHTML = `
+          <img src="${user.photoURL||''}" style="width:28px;height:28px;border-radius:50%;vertical-align:middle;margin-right:6px">
+          <span style="font-size:12px;color:var(--text2)">${user.displayName||user.email}</span>
+          <button class="btn" style="margin-left:8px;padding:4px 10px;min-height:0;font-size:11px" onclick="_fbSignOut()">ログアウト</button>`;
+      }
+      // リアルタイム同期開始
+      window._fbStartSync();
+    } else {
+      // 未ログイン → オーバーレイ表示
+      if(overlay) overlay.style.display = 'flex';
+      if(userInfo) userInfo.innerHTML = '';
+    }
+  });
+</script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=DM+Mono:wght@400;500&display=swap');
+:root{
+  --bg:#f5f4f0;--surface:#fff;--surface2:#f0efe9;--border:#e2e0d8;--border2:#ccc9be;
+  --text:#1a1917;--text2:#6b6860;--text3:#a09e97;--r:10px;--rs:6px;
+  --s-wish:#fef9c3;--f-wish:#854d0e;
+  --s-limit:#e0e7ff;--f-limit:#3730a3;
+  --s-kibou:#dcfce7;--f-kibou:#166534;
+  --s-hol:#fff3cd;--f-hol:#b45309;
+  --s-tocho-day:#ffedd5;--f-tocho-day:#c2410c;
+  --conflict:#dc2626;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Noto Sans JP',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:13px;line-height:1.5}
+
+/* ── Header ── */
+.hdr{background:var(--surface);border-bottom:1px solid var(--border);padding:0 16px;display:flex;align-items:center;gap:10px;height:52px;position:sticky;top:0;z-index:100;flex-wrap:wrap}
+.logo{font-weight:700;font-size:15px;letter-spacing:-.3px;white-space:nowrap;cursor:pointer}
+.logo span{color:var(--text3);font-weight:400}
+.tabs{display:flex;gap:2px;margin-left:auto}
+.tab{padding:6px 14px;border-radius:99px;font-size:12px;font-weight:500;cursor:pointer;border:none;background:none;color:var(--text2);transition:all .15s;font-family:inherit}
+.tab.on{background:var(--text);color:#fff}
+.mth{font-family:'DM Mono',monospace;font-size:13px;color:var(--text2);display:flex;align-items:center;gap:4px}
+.mbtn{width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--text2);transition:all .12s;font-family:inherit}
+.mbtn:hover{background:var(--surface2)}
+
+/* ── Screens ── */
+.scr{display:none;padding:16px;max-width:1200px;margin:0 auto}
+.scr.on{display:block}
+
+/* ── Common ── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px}
+.card+.card{margin-top:12px}
+.card-title{font-size:12px;font-weight:700;margin-bottom:10px;color:var(--text)}
+.sec-label{font-size:10px;font-weight:500;color:var(--text3);letter-spacing:.06em;text-transform:uppercase;border-bottom:1px solid var(--border);padding-bottom:4px;margin-bottom:10px}
+.inp{padding:6px 9px;border:1px solid var(--border2);border-radius:var(--rs);font-family:inherit;font-size:12px;background:var(--surface);color:var(--text);outline:none}
+.inp:focus{box-shadow:0 0 0 3px rgba(0,0,0,.07)}
+.btn{padding:8px 16px;border-radius:var(--rs);border:1px solid var(--border2);background:var(--surface);font-family:inherit;font-size:12px;font-weight:500;cursor:pointer;color:var(--text2);transition:all .12s;min-height:40px}
+.btn:hover{background:var(--surface2)}
+.btn.primary{background:var(--text);color:#fff;border-color:transparent}
+.btn.primary:hover{opacity:.85}
+.btn.danger{background:#fee2e2;color:#991b1b;border-color:#fecaca}
+.btn.warn{background:#FAEEDA;color:#854F0B;border-color:#EF9F27}
+.leg{font-size:10px;font-weight:500;padding:3px 8px;border-radius:4px}
+.note-box{font-size:11px;color:var(--text2);line-height:1.6;padding:8px 10px;background:var(--surface2);border-radius:var(--rs);margin-top:6px}
+
+/* ── Staff Screen ── */
+.stf-hdr{display:flex;align-items:center;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+.stf-select{padding:8px 10px;border:1px solid var(--border2);border-radius:var(--rs);background:var(--surface);font-family:inherit;font-size:13px;color:var(--text);cursor:pointer;min-height:40px}
+.mode-pills{display:flex;gap:4px;flex-wrap:wrap}
+.mpill{padding:8px 12px;border-radius:99px;font-size:12px;font-weight:500;cursor:pointer;border:1.5px solid var(--border2);background:var(--surface);color:var(--text2);transition:all .12s;font-family:inherit;min-height:40px}
+.mpill.wish.on{background:var(--s-wish);color:var(--f-wish);border-color:var(--f-wish)}
+.mpill.limit.on{background:var(--s-limit);color:var(--f-limit);border-color:var(--f-limit)}
+.mpill.kibou.on{background:var(--s-kibou);color:var(--f-kibou);border-color:var(--f-kibou)}
+.stf-layout{display:grid;grid-template-columns:1fr 310px;gap:14px;align-items:start}
+.stf-col-left{display:flex;flex-direction:column;gap:12px}
+.stf-col-right{display:flex;flex-direction:column;gap:12px}
+
+/* ── Calendar ── */
+.cal-legend{display:flex;gap:5px;margin-bottom:10px;flex-wrap:wrap}
+.cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-bottom:3px}
+.cal-dow div{text-align:center;font-size:10px;color:var(--text3);font-weight:500;padding:2px 0}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.cal-cell{border-radius:var(--rs);text-align:center;padding:9px 2px;font-size:12px;cursor:pointer;border:1.5px solid transparent;transition:all .12s;user-select:none;position:relative;line-height:1.3;min-height:44px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.cal-cell:hover{filter:brightness(.92)}
+.cal-cell.empty{visibility:hidden;pointer-events:none}
+.cal-cell.normal{background:var(--surface2);color:var(--text2)}
+.cal-cell.sat{background:#dbeafe;color:#1e40af}
+.cal-cell.sun{background:#fee2e2;color:#991b1b}
+.cal-cell.hol{background:var(--s-hol);color:var(--f-hol)}
+.cal-cell.wish{background:var(--s-wish);color:var(--f-wish);border-color:#ca8a04;font-weight:500}
+.cal-cell.limit{background:var(--s-limit);color:var(--f-limit);border-color:#6366f1;font-weight:500}
+.cal-cell.kibou{background:var(--s-kibou);color:var(--f-kibou);border-color:#16a34a;font-weight:500}
+.cal-cell.wish.kibou{background:linear-gradient(135deg,var(--s-wish) 50%,var(--s-kibou) 50%);color:var(--f-kibou);border-color:#16a34a;font-weight:500}
+.cal-cell.selected{box-shadow:0 0 0 2px var(--text)}
+.cal-cell.tocho-day{background:var(--s-tocho-day)!important;border-color:var(--f-tocho-day)!important;border-width:2px!important}
+.dot{font-size:8px;display:block;line-height:1.2}
+
+/* ── Side panel ── */
+.side-empty{font-size:12px;color:var(--text3);text-align:center;padding:20px 0;line-height:1.7}
+.ng-toggle{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
+.ng-btn{font-size:12px;font-weight:500;padding:8px 12px;border-radius:5px;cursor:pointer;border:2px solid transparent;font-family:inherit;transition:all .12s;min-height:40px}
+.ng-btn.ng{opacity:1}
+.ng-btn.ok{opacity:.35}
+.kibou-shifts{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
+.kibou-sh{font-size:12px;font-weight:500;padding:8px 12px;border-radius:5px;cursor:pointer;border:2px solid transparent;font-family:inherit;transition:all .12s;min-height:40px}
+.kibou-sh.selected{border-color:currentColor!important;transform:scale(1.05)}
+.save-btn{margin-top:8px;width:100%;padding:10px;border-radius:var(--rs);background:var(--text);color:#fff;border:none;font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;min-height:44px}
+.save-btn:hover{opacity:.85}
+.sum-list{display:flex;flex-direction:column;gap:5px}
+.sum-item{display:flex;align-items:flex-start;gap:7px;padding:8px 9px;background:var(--surface2);border-radius:var(--rs);font-size:12px}
+.sum-date{font-family:'DM Mono',monospace;font-weight:500;min-width:42px;flex-shrink:0}
+.sum-tags{display:flex;flex-direction:column;gap:3px;flex:1}
+.sum-type{font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;display:inline-block;width:fit-content}
+.sum-comment{color:var(--text2);font-size:11px;margin-top:1px}
+.sum-del{color:var(--text3);cursor:pointer;font-size:16px;line-height:1;flex-shrink:0;padding:2px}
+.sum-del:hover{color:var(--conflict)}
+
+/* ── Nenkyu Card ── */
+.yk-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:12px;margin-top:12px}
+.yk-title{font-size:12px;font-weight:700;margin-bottom:10px}
+.yk-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.yk-item{background:var(--surface2);border-radius:var(--rs);padding:8px 10px}
+.yk-label{font-size:10px;color:var(--text2);font-weight:500;margin-bottom:3px}
+.yk-val{font-size:17px;font-weight:700;font-family:'DM Mono',monospace}
+.yk-sub{font-size:10px;color:var(--text2);margin-top:1px}
+.yk-total{border:2px solid #378ADD;background:#E6F1FB;border-radius:var(--rs);padding:8px 10px}
+.yk-total .yk-label{color:#185FA5}
+.yk-total .yk-val{color:#0C447C}
+.bar-wrap{margin-bottom:4px}
+.bar-track{height:8px;border-radius:4px;background:var(--surface2);overflow:hidden;display:flex}
+.bar-carry{background:#E24B4A;height:100%}
+.bar-curr{background:#378ADD;height:100%}
+.bar-legend{display:flex;gap:10px;margin-top:4px;flex-wrap:wrap}
+.bl-item{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2)}
+.bl-dot{width:8px;height:8px;border-radius:2px}
+
+/* ── ICS ── */
+.ics-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:12px;margin-top:12px}
+.ics-months{display:flex;gap:4px;flex-wrap:wrap;margin:8px 0}
+.ics-chip{font-size:11px;padding:6px 10px;border-radius:99px;cursor:pointer;border:1px solid var(--border2);color:var(--text2);background:var(--surface2);user-select:none;transition:all .12s;min-height:36px}
+.ics-chip.on{background:#E6F1FB;color:#185FA5;border-color:#B5D4F4;font-weight:500}
+.ics-shifts{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0}
+.ics-sh-btn{font-size:11px;padding:5px 10px;border-radius:4px;cursor:pointer;border:1.5px solid transparent;font-family:inherit;font-weight:500;transition:all .12s;min-height:36px}
+.ics-sh-btn.on{border-color:currentColor}
+.ics-sh-btn.off{opacity:.35}
+
+/* ── Admin ── */
+.admin-top{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.alert-bar{background:#fef2f2;border:1px solid #fecaca;border-radius:var(--rs);padding:8px 12px;margin-bottom:10px;font-size:12px;color:#991b1b;display:none;line-height:1.6}
+.alert-bar.on{display:block}
+.tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--r);background:var(--surface)}
+table{border-collapse:collapse;font-size:11px;table-layout:fixed}
+th,td{border:1px solid var(--border);padding:0;white-space:nowrap}
+th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px;font-size:10px;text-align:center}
+.th-name,.td-name{position:sticky;left:0;z-index:3}
+.th-name{width:54px;min-width:54px;text-align:left;padding-left:6px;background:var(--surface2);z-index:4}
+.td-name{text-align:left;font-weight:500;font-size:10px;color:var(--text2);background:var(--surface2);padding:4px 6px}
+.th-day{width:34px;min-width:34px}
+.th-sum{width:42px;min-width:42px}
+.th-sat{background:#dbeafe;color:#1e40af}
+.th-sun{background:#fee2e2;color:#991b1b}
+.th-hol{background:var(--s-hol);color:var(--f-hol)}
+.th-tocho{background:var(--s-tocho-day);color:var(--f-tocho-day);border-bottom:2px solid var(--f-tocho-day)!important}
+.td-sum{font-weight:500;font-size:11px;padding:4px;text-align:center}
+.cell{cursor:pointer;text-align:center;padding:4px 2px;font-size:10px;font-weight:500;transition:filter .1s;position:relative}
+.cell:hover{filter:brightness(.9)}
+.cell.conflict{outline:2px solid var(--conflict);outline-offset:-2px}
+.cell.wish-mark::after{content:'';position:absolute;top:2px;right:2px;width:5px;height:5px;border-radius:50%;background:#ca8a04}
+.cell.limit-mark::before{content:'▲';position:absolute;top:1px;left:2px;font-size:7px;color:#6366f1;line-height:1}
+.cell.kibou-mark::after{content:'★';position:absolute;top:1px;right:1px;font-size:7px;color:#166534;line-height:1}
+.c-ok{background:#EAF3DE;color:#27500A;font-weight:500}
+.c-warn{background:#FAEEDA;color:#854F0B;font-weight:500}
+.c-over{background:#FCEBEB;color:#A32D2D;font-weight:500}
+.c-neu{background:var(--surface2);color:var(--text2);font-weight:500}
+.stat-bar{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--rs);padding:8px 12px}
+.stat-label{font-size:10px;color:var(--text3);margin-bottom:2px}
+.stat-val{font-size:18px;font-weight:700;font-family:'DM Mono',monospace}
+.stat-sub{font-size:10px;color:var(--text2);margin-top:1px}
+.taiki-row td{background:#f0fdf4;font-size:10px;color:#166534}
+.taiki-name-cell{font-size:10px;padding:3px 4px;text-align:center}
+
+/* ── Picker ── */
+.pk-overlay{position:fixed;inset:0;z-index:200;display:none;background:rgba(0,0,0,.15)}
+.pk-overlay.on{display:flex;align-items:center;justify-content:center}
+.pk-box{background:var(--surface);border:1px solid var(--border2);border-radius:var(--r);padding:12px;box-shadow:0 8px 28px rgba(0,0,0,.18);z-index:201;min-width:220px;max-width:300px;width:90vw;max-height:80vh;overflow-y:auto}
+.pk-info{font-size:11px;color:var(--text2);margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border);line-height:1.6;display:none}
+.pk-info.on{display:block}
+.pk-conflict{color:var(--conflict);font-weight:500;margin-top:3px}
+.pk-comment{color:var(--f-limit);margin-top:2px}
+.pk-shifts{display:flex;flex-wrap:wrap;gap:5px}
+.pk-btn{font-size:12px;font-weight:500;padding:8px 12px;border-radius:5px;cursor:pointer;border:none;font-family:inherit;transition:opacity .1s;min-height:40px}
+.pk-btn:hover{opacity:.76}
+.pk-btn.cf{outline:2px solid var(--conflict)}
+.pk-close{width:100%;margin-top:8px;padding:8px;border-radius:var(--rs);border:1px solid var(--border2);background:none;font-family:inherit;font-size:12px;cursor:pointer;color:var(--text2)}
+
+/* ── Settings ── */
+.set-layout{display:grid;grid-template-columns:160px 1fr;gap:16px;align-items:start}
+.set-nav{display:flex;flex-direction:column;gap:2px}
+.set-nav-btn{padding:10px 12px;border-radius:var(--rs);font-size:12px;font-weight:500;cursor:pointer;border:none;background:none;color:var(--text2);text-align:left;font-family:inherit;transition:all .12s;min-height:44px}
+.set-nav-btn:hover{background:var(--surface2)}
+.set-nav-btn.on{background:var(--text);color:#fff}
+.set-panel{display:none}
+.set-panel.on{display:block}
+.set-row{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface2);border-radius:var(--rs);margin-bottom:6px;flex-wrap:wrap;min-height:52px}
+.set-label{font-size:12px;font-weight:500;flex:1}
+.set-desc{font-size:11px;color:var(--text2);margin-top:2px}
+.toggle{position:relative;width:40px;height:22px;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.toggle-track{position:absolute;inset:0;background:var(--border2);border-radius:11px;cursor:pointer;transition:background .2s}
+.toggle input:checked+.toggle-track{background:#378ADD}
+.toggle-thumb{position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s;pointer-events:none}
+.toggle input:checked~.toggle-thumb{transform:translateX(18px)}
+.staff-mgr-item{display:flex;align-items:center;gap:8px;padding:10px;background:var(--surface2);border-radius:var(--rs);margin-bottom:5px;transition:opacity .15s;min-height:52px}
+.staff-mgr-item.dragging{opacity:.4}
+.staff-mgr-item.drag-over{border:2px dashed var(--border2)}
+.smgr-handle{color:var(--text3);cursor:grab;font-size:18px;padding:0 4px;user-select:none}
+.smgr-name{flex:1;font-size:13px;font-weight:500}
+.smgr-btns{display:flex;gap:4px}
+.smgr-mv{width:36px;height:36px;border-radius:6px;border:1px solid var(--border2);background:none;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;color:var(--text2)}
+.smgr-mv:hover{background:var(--surface)}
+.smgr-del{font-size:11px;padding:6px 10px;border-radius:99px;border:1px solid var(--border2);background:none;color:var(--text2);cursor:pointer;font-family:inherit;min-height:36px}
+.smgr-del:hover{background:#fee2e2;color:#991b1b;border-color:#fecaca}
+.add-row{display:flex;gap:6px;margin-top:8px}
+.add-inp{flex:1;padding:10px;border:1px solid var(--border2);border-radius:var(--rs);font-family:inherit;font-size:13px;background:var(--surface);color:var(--text);outline:none;min-height:44px}
+.shift-hdr{display:grid;grid-template-columns:24px 80px 55px 1fr 55px 55px 22px;gap:5px;align-items:center;padding:4px 8px;font-size:10px;font-weight:500;color:var(--text3)}
+.shift-row{display:grid;grid-template-columns:24px 80px 55px 1fr 55px 55px 22px;gap:5px;align-items:center;padding:8px;background:var(--surface2);border-radius:var(--rs);margin-bottom:4px;min-height:44px}
+.sh-handle{color:var(--text3);cursor:grab;text-align:center}
+.sh-chip{padding:4px 8px;border-radius:4px;font-size:11px;font-weight:500;text-align:center}
+.sh-select{padding:4px 5px;border:1px solid var(--border2);border-radius:4px;font-size:11px;background:var(--surface);color:var(--text);font-family:inherit;width:100%;min-height:32px}
+.sh-del{color:var(--text3);cursor:pointer;font-size:18px;text-align:center;line-height:1;padding:4px}
+.sh-del:hover{color:var(--conflict)}
+.grp-row{display:grid;grid-template-columns:1fr 140px 30px;gap:6px;align-items:center;padding:8px 10px;background:var(--surface2);border-radius:var(--rs);margin-bottom:4px;min-height:44px}
+.grp-inp{padding:6px 8px;border:1px solid var(--border2);border-radius:4px;font-size:12px;font-family:inherit;background:var(--surface);color:var(--text);outline:none;width:100%}
+.nk-row{display:grid;grid-template-columns:80px 1fr 1fr 120px;gap:8px;align-items:center;padding:10px;background:var(--surface2);border-radius:var(--rs);margin-bottom:5px;font-size:12px;min-height:52px}
+.nk-name{font-weight:500}
+.nk-inp-wrap{display:flex;align-items:center;gap:4px}
+.nk-inp{width:54px;padding:6px;border:1px solid var(--border2);border-radius:4px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);outline:none;text-align:center;min-height:36px}
+.nk-status{font-size:11px;font-weight:500}
+.msk-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
+.msk-item{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 4px;background:var(--surface2);border-radius:var(--rs)}
+.msk-label{font-size:10px;color:var(--text2);font-weight:500}
+.msk-inp{width:56px;padding:6px;border:1px solid var(--border2);border-radius:4px;font-size:14px;font-family:'DM Mono',monospace;background:var(--surface);color:var(--text);outline:none;text-align:center;min-height:40px}
+.tocho-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:8px}
+.tc-cell{border-radius:var(--rs);text-align:center;padding:8px 2px;font-size:12px;cursor:pointer;border:1.5px solid transparent;background:var(--surface2);color:var(--text2);user-select:none;transition:all .12s;min-height:44px;display:flex;align-items:center;justify-content:center}
+.tc-cell:hover{filter:brightness(.92)}
+.tc-cell.empty{visibility:hidden;pointer-events:none}
+.tc-cell.sat{background:#dbeafe;color:#1e40af}
+.tc-cell.sun{background:#fee2e2;color:#991b1b}
+.tc-cell.hol{background:var(--s-hol);color:var(--f-hol)}
+.tc-cell.tocho{background:var(--s-tocho-day);color:var(--f-tocho-day);border-color:var(--f-tocho-day);border-width:2px;font-weight:700}
+.data-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+
+/* ── Responsive (smartphone) ── */
+@media(max-width:700px){
+  .hdr{height:auto;padding:8px 12px;gap:6px}
+  .mth{font-size:12px}
+  .mbtn{width:36px;height:36px;font-size:16px}
+  .tabs{gap:1px}
+  .tab{padding:8px 10px;font-size:11px}
+  .scr{padding:10px}
+  .set-layout{grid-template-columns:1fr}
+  .set-nav{flex-direction:row;flex-wrap:wrap;gap:4px;margin-bottom:10px}
+  .set-nav-btn{padding:8px 10px;font-size:11px;min-height:36px;border:1px solid var(--border2)}
+  .set-nav-btn.on{background:var(--text);color:#fff}
+  .msk-grid{grid-template-columns:repeat(3,1fr)}
+  .shift-hdr,.shift-row{grid-template-columns:24px 1fr 45px 1fr 40px 45px 22px;font-size:10px}
+  .nk-row{grid-template-columns:60px 1fr 1fr;gap:6px}
+  .nk-row>div:last-child{grid-column:span 3;padding-top:4px;border-top:1px solid var(--border)}
+  .admin-top{gap:6px}
+  .admin-top .btn{font-size:11px;padding:8px 10px;min-height:36px}
+  .pk-box{width:95vw;max-width:360px}
+  .stf-hdr{gap:6px}
+  .mpill{padding:8px 10px;font-size:11px}
+}
+
+/* ── Print removed - Excel export only ── */
+</style>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+</head>
+<body>
+
+<!-- ログインオーバーレイ -->
+<div id="login-overlay" style="position:fixed;inset:0;background:rgba(245,244,240,0.97);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px">
+  <div style="font-size:22px;font-weight:700;letter-spacing:-.3px">勤務表</div>
+  <div style="font-size:13px;color:#6b6860;margin-bottom:8px">職場メンバーのGoogleアカウントでログインしてください</div>
+  <button onclick="_fbSignIn()" style="display:flex;align-items:center;gap:10px;padding:12px 24px;border-radius:8px;border:1px solid #e2e0d8;background:#fff;font-size:14px;font-weight:500;cursor:pointer;font-family:inherit;box-shadow:0 1px 4px rgba(0,0,0,.08)">
+    <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" style="width:20px;height:20px">
+    Googleでログイン
+  </button>
+</div>
+
+<header class="hdr">
+  <div class="logo" id="logo-text" onclick="editTitle()">放射線科<span id="logo-sub"> 勤務表</span></div>
+  <div class="mth">
+    <button class="mbtn" onclick="changeMonth(-1)">‹</button>
+    <span id="month-label">2026年 5月</span>
+    <button class="mbtn" onclick="changeMonth(1)">›</button>
+  </div>
+  <div class="tabs">
+    <button class="tab on" onclick="showScreen('staff')">希望入力</button>
+    <button class="tab" onclick="showScreen('admin')">管理者</button>
+    <button class="tab" onclick="showScreen('settings')">設定</button>
+  </div>
+  <div id="user-info" style="display:flex;align-items:center;margin-left:8px"></div>
+</header>
+
+<!-- 希望入力 -->
+<div class="scr on" id="scr-staff">
+  <div class="stf-hdr">
+    <select class="stf-select" id="stf-sel" onchange="onStaffChange()"></select>
+    <div class="mode-pills">
+      <button class="mpill wish on" id="pill-wish" onclick="setMode('wish')">● 希望休</button>
+      <button class="mpill limit" id="pill-limit" onclick="setMode('limit')">▲ 勤務条件</button>
+      <button class="mpill kibou" id="pill-kibou" onclick="setMode('kibou')">★ 希望勤務</button>
+    </div>
+    <span style="font-size:11px;color:var(--text3)" id="mode-hint">タップで希望休を登録</span>
+  </div>
+  <!-- PC: 2カラム grid。縦長/モバイル: JSがDOM順序を並び替えて1列表示 -->
+  <div id="stf-layout-wrap" style="display:grid;grid-template-columns:1fr 310px;gap:14px;align-items:start">
+
+    <!-- 左カラムコンテナ -->
+    <div id="stf-col-left" style="display:flex;flex-direction:column;gap:12px">
+      <!-- ① カレンダーカード -->
+      <div class="card" id="card-cal">
+        <div class="cal-legend" id="stf-cal-legend"></div>
+        <div class="cal-dow">
+          <div style="color:#991b1b">日</div><div>月</div><div>火</div><div>水</div><div>木</div><div>金</div>
+          <div style="color:#1e40af">土</div>
+        </div>
+        <div class="cal-grid" id="stf-cal"></div>
+      </div>
+      <!-- ③ 有給カード（縦長時は②の後に来る） -->
+      <div class="yk-card" id="card-nenkyu">
+        <div class="yk-title">有給状況（<span id="yk-year"></span>年度）</div>
+        <div class="yk-grid">
+          <div class="yk-item"><div class="yk-label">前年度繰越</div><div class="yk-val" id="yk-carry">—</div><div class="yk-sub" id="yk-carry-sub"></div></div>
+          <div class="yk-item"><div class="yk-label">本年度付与</div><div class="yk-val" id="yk-grant">—</div><div class="yk-sub" id="yk-grant-sub"></div></div>
+          <div class="yk-item" style="background:#EAF3DE;border-radius:var(--rs);padding:8px 10px">
+            <div class="yk-label" style="color:#3B6D11">今年度 消化合計</div>
+            <div class="yk-val" id="yk-consumed" style="color:#27500A">—</div>
+            <div class="yk-sub" id="yk-consumed-sub"></div>
+          </div>
+          <div class="yk-item yk-total"><div class="yk-label">使用可能合計</div><div class="yk-val" id="yk-total">—</div><div class="yk-sub" id="yk-total-sub"></div></div>
+        </div>
+        <div class="bar-wrap">
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text2);margin-bottom:4px">
+            <span>消化状況</span><span id="yk-remain" style="font-weight:500"></span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-carry" id="bar-carry" style="width:0%"></div>
+            <div class="bar-curr" id="bar-curr" style="width:0%"></div>
+          </div>
+          <div class="bar-legend">
+            <div class="bl-item"><div class="bl-dot" style="background:#E24B4A"></div>繰越消化</div>
+            <div class="bl-item"><div class="bl-dot" style="background:#378ADD"></div>本年度消化</div>
+            <div class="bl-item"><div class="bl-dot" style="background:var(--surface2);border:1px solid var(--border)"></div>残</div>
+          </div>
+        </div>
+      </div>
+      <!-- ICSカード -->
+      <div class="ics-card" id="card-ics">
+        <div class="card-title">カレンダー取り込み（.ics）</div>
+        <div style="font-size:11px;color:var(--text2)">取り込む月を選択</div>
+        <div class="ics-months" id="ics-months"></div>
+        <div style="font-size:11px;color:var(--text2);margin-top:6px">取り込む勤務種別</div>
+        <div class="ics-shifts" id="ics-shifts"></div>
+        <button class="btn primary" style="margin-top:8px;width:100%" onclick="downloadICS()">↓ .ics をダウンロード</button>
+        <div style="font-size:10px;color:var(--text3);margin-top:4px">iPhone / Google カレンダー 両対応</div>
+      </div>
+    </div>
+
+    <!-- 右カラムコンテナ -->
+    <div id="stf-col-right" style="display:flex;flex-direction:column;gap:12px">
+      <!-- ② 詳細カード -->
+      <div class="card" id="detail-card">
+        <div class="card-title" id="detail-title">日付を選択してください</div>
+        <div class="side-empty" id="detail-empty">カレンダーで日付をタップすると<br>設定できます</div>
+        <div id="detail-body" style="display:none">
+          <div id="db-wish">
+            <div style="font-size:12px;color:var(--text2);margin-bottom:8px">タップで希望休を登録・解除します</div>
+          </div>
+          <div id="db-limit" style="display:none">
+            <div style="font-size:11px;color:var(--text2);margin-bottom:7px">できない勤務をタップ（複数可）</div>
+            <div class="ng-toggle" id="ng-btns"></div>
+            <div style="margin-top:6px">
+              <div style="font-size:11px;color:var(--text2);margin-bottom:4px">理由・コメント（任意）</div>
+              <textarea id="comment-inp" rows="2" placeholder="例：通院のため午前のみ可…" style="width:100%;padding:7px 9px;border:1px solid var(--border2);border-radius:var(--rs);font-family:inherit;font-size:12px;resize:none;background:var(--surface2);color:var(--text);outline:none"></textarea>
+            </div>
+            <button class="save-btn" onclick="saveCondition()">保存</button>
+          </div>
+          <div id="db-kibou" style="display:none">
+            <div style="font-size:11px;color:var(--text2);margin-bottom:7px">希望する勤務を1つ選択</div>
+            <div class="kibou-shifts" id="kibou-btns"></div>
+            <button class="save-btn" onclick="saveKibou()">保存</button>
+          </div>
+        </div>
+      </div>
+      <!-- ② 登録済みカード -->
+      <div class="card" id="card-summary">
+        <div class="card-title">登録済み（<span id="sum-month"></span>）</div>
+        <div class="sum-list" id="sum-list"><div class="side-empty">まだ登録がありません</div></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 管理者 -->
+<div class="scr" id="scr-admin">
+  <div class="admin-top">
+    <div id="admin-legend" style="display:flex;gap:4px;flex-wrap:wrap;flex:1"></div>
+    <button class="btn warn" onclick="resetMonth()">当月リセット</button>
+    <button class="btn primary" onclick="exportExcel()">Excelで出力</button>
+  </div>
+  <div class="alert-bar" id="alert-bar"></div>
+  <div class="tbl-wrap">
+    <table id="admin-tbl">
+      <thead id="admin-thead"></thead>
+      <tbody id="admin-tbody"></tbody>
+      <tfoot id="admin-tfoot"></tfoot>
+    </table>
+  </div>
+  <div class="stat-bar" id="stat-bar"></div>
+</div>
+
+<!-- 設定 -->
+<div class="scr" id="scr-settings">
+  <div class="set-layout">
+    <div class="card set-nav" id="set-nav">
+      <button class="set-nav-btn on" onclick="showSetPanel('basic')">基本設定</button>
+      <button class="set-nav-btn" onclick="showSetPanel('staff')">スタッフ管理</button>
+      <button class="set-nav-btn" onclick="showSetPanel('shifts')">勤務種別</button>
+      <button class="set-nav-btn" onclick="showSetPanel('shukyu')">週休規定日数</button>
+      <button class="set-nav-btn" onclick="showSetPanel('tocho')">当直・救急日</button>
+      <button class="set-nav-btn" onclick="showSetPanel('nenkyu')">有給管理</button>
+      <button class="set-nav-btn" onclick="showSetPanel('data')">データ</button>
+    </div>
+    <div class="card">
+      <div class="set-panel on" id="sp-basic">
+        <div class="sec-label">基本設定</div>
+        <div class="set-row"><div style="flex:1"><div class="set-label">科名・タイトル</div></div><input class="inp" id="cfg-title" value="放射線科" style="width:140px" onchange="saveCfg()"></div>
+        <div class="set-row"><div style="flex:1"><div class="set-label">当直 → 翌日を明けに自動セット</div></div><label class="toggle"><input type="checkbox" id="cfg-auto-ake" checked onchange="saveCfg()"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>
+        <div class="set-row"><div style="flex:1"><div class="set-label">月間 希望休の上限日数</div><div class="set-desc">超過時は警告のみ（週休には反映）</div></div><input type="number" class="inp" id="cfg-wish-limit" value="6" min="0" max="31" style="width:70px" onchange="saveCfg()"><span style="font-size:12px;color:var(--text2)">日</span></div>
+        <div class="set-row"><div style="flex:1"><div class="set-label">1日あたりの希望休 上限人数（平日）</div><div class="set-desc">超過時は警告のみ（登録は可能）</div></div><input type="number" class="inp" id="cfg-wish-day-limit" value="2" min="1" max="20" style="width:70px" onchange="saveCfg()"><span style="font-size:12px;color:var(--text2)">名</span></div>
+      </div>
+      <div class="set-panel" id="sp-staff">
+        <div class="sec-label">スタッフ管理</div>
+        <div id="staff-mgr-list"></div>
+        <div class="add-row"><input class="add-inp" id="add-staff-inp" placeholder="氏名を入力（例：田中 太郎）" onkeydown="if(event.key==='Enter')addStaff()"><button class="btn primary" onclick="addStaff()">追加</button></div>
+        <div class="note-box">⠿ をドラッグ または ▲▼ ボタンで並び替え</div>
+      </div>
+      <div class="set-panel" id="sp-shifts">
+        <div class="sec-label">勤務種別のカスタマイズ</div>
+        <div class="shift-hdr"><div></div><div>種別名</div><div>カウント</div><div>集計グループ</div><div>色</div><div>表示</div><div></div></div>
+        <div id="shift-list"></div>
+        <button class="btn" style="width:100%;margin-top:4px;border-style:dashed" onclick="addShift()">＋ 勤務種別を追加</button>
+        <div class="sec-label" style="margin-top:16px">集計グループ管理</div>
+        <div id="grp-list"></div>
+        <button class="btn" style="width:100%;margin-top:4px;border-style:dashed" onclick="addGroup()">＋ 集計グループを追加</button>
+        <div class="note-box">グループ名が管理者画面の集計欄名になります。</div>
+      </div>
+      <div class="set-panel" id="sp-shukyu">
+        <div class="sec-label">月別 週休規定日数</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:8px">各月の週休規定日数（差分を管理者画面の週休計欄に表示）</div>
+        <div class="msk-grid" id="msk-grid"></div>
+      </div>
+      <div class="set-panel" id="sp-tocho">
+        <div class="sec-label">当直・救急日（<span id="tc-month-label"></span>）</div>
+        <div class="note-box" style="margin-bottom:8px">当直日：必要人数 <strong>2名</strong>　当直日以外：待機者 <strong>1名以上</strong></div>
+        <div class="cal-dow" style="margin-bottom:3px"><div style="color:#991b1b">日</div><div>月</div><div>火</div><div>水</div><div>木</div><div>金</div><div style="color:#1e40af">土</div></div>
+        <div class="tocho-cal-grid" id="tc-cal"></div>
+        <div style="margin-top:10px;font-size:12px;color:var(--text2)">設定済み：<span id="tc-days-label" style="font-weight:500;color:var(--text)">なし</span></div>
+      </div>
+      <div class="set-panel" id="sp-nenkyu">
+        <div class="sec-label">有給管理（<span id="nk-year-label"></span>年度）</div>
+        <div id="nk-list"></div>
+        <div style="margin-top:12px"><button class="btn warn" onclick="updateNenkyu()">有給を更新する（10月）</button></div>
+        <div class="note-box">「有給を更新する」を押すと残日数が前年度繰越に自動セットされます。</div>
+      </div>
+      <div class="set-panel" id="sp-data">
+        <div class="sec-label">データ保存・読み込み</div>
+        <div class="set-row"><div style="flex:1"><div class="set-label">自動保存</div><div class="set-desc">ブラウザのローカルストレージに自動保存</div></div><span style="font-size:11px;color:var(--text3)">常時ON</span></div>
+        <div class="data-actions">
+          <button class="btn primary" onclick="exportData()">↓ JSONで書き出し</button>
+          <button class="btn" onclick="document.getElementById('import-file').click()">↑ JSONを読み込み</button>
+          <input type="file" id="import-file" accept=".json" style="display:none" onchange="importData(event)">
+          <button class="btn danger" onclick="clearData()">データをリセット</button>
+        </div>
+        <div class="note-box">書き出したJSONで別PCやブラウザに移行できます。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Picker（管理者用） -->
+<div class="pk-overlay" id="pk-overlay" onclick="closePicker()">
+  <div class="pk-box" id="pk-box" onclick="event.stopPropagation()">
+    <div class="pk-info" id="pk-info"></div>
+    <div class="pk-shifts" id="pk-shifts"></div>
+    <button class="pk-close" onclick="closePicker()">閉じる</button>
+  </div>
+</div>
+
+<script>
+/* ══ HOLIDAY ══ */
+function getHolidays(y,m){
+  const h=new Set();
+  const add=(mo,d)=>{if(mo===m)h.add(d);};
+  const hm=(mo,nth)=>{const d1=new Date(y,mo-1,1).getDay();const first=d1===1?1:(8-d1)%7+1;add(mo,first+(nth-1)*7);};
+  add(1,1);add(2,11);add(2,23);add(4,29);add(5,3);add(5,4);add(5,5);add(8,11);add(11,3);add(11,23);
+  hm(1,2);hm(7,3);hm(9,3);hm(10,2);
+  if(m===3){const sv=Math.floor(20.8431+0.242194*(y-1980)-Math.floor((y-1980)/4));add(3,sv);}
+  if(m===9){const av=Math.floor(23.2488+0.242194*(y-1980)-Math.floor((y-1980)/4));add(9,av);}
+  const days=new Date(y,m,0).getDate();
+  const fu=new Set();
+  h.forEach(d=>{if(new Date(y,m-1,d).getDay()===0){let nd=d+1;while(h.has(nd)||fu.has(nd))nd++;if(nd<=days)fu.add(nd);}});
+  fu.forEach(d=>h.add(d));
+  for(let d=2;d<days;d++){if(h.has(d-1)&&h.has(d+1)&&new Date(y,m-1,d).getDay()!==0&&!h.has(d))h.add(d);}
+  return h;
+}
+
+/* ══ STATE ══ */
+const DOW=['日','月','火','水','木','金','土'];
+const MN=['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+
+let cfg={title:'放射線科',autoAke:true,wishLimit:6,wishDayLimit:2};
+let STAFF=['畠山 智史','横田 崇','髙松 勇佑','工藤 哲史','平 修一','長瀨 一希','岩城 くるみ','陳祐 綾花'];
+let SHIFTS=[
+  {k:'nikkn', l:'日勤',      bg:'#dbeafe',fg:'#1e40af',count:1,  group:'日勤',visible:true},
+  {k:'hayade',l:'早出',      bg:'#d1fae5',fg:'#065f46',count:1,  group:'日勤',visible:true},
+  {k:'tocho', l:'当直',      bg:'#fee2e2',fg:'#991b1b',count:1,  group:'当直',visible:true},
+  {k:'ake',   l:'明け',      bg:'#fef3c7',fg:'#92400e',count:0,  group:'なし',visible:true},
+  {k:'taiki', l:'待機',      bg:'#dcfce7',fg:'#166534',count:0,  group:'なし',visible:true},
+  {k:'shukyu',l:'週休',      bg:'#f1f0ea',fg:'#57534e',count:1,  group:'週休',visible:true},
+  {k:'nenkyu',l:'年休',      bg:'#fce7f3',fg:'#9d174d',count:1,  group:'有給',visible:true},
+  {k:'ampms', l:'午前(週休)',bg:'#ede9fe',fg:'#4c1d95',count:0.5,group:'週休',visible:true},
+  {k:'ampmn', l:'午前(年休)',bg:'#ffedd5',fg:'#7c2d12',count:0.5,group:'有給',visible:true},
+  {k:'empty', l:'―',         bg:'#f0efe9',fg:'#a09e97',count:0,  group:'なし',visible:true},
+];
+let GROUPS=[
+  {name:'日勤',special:null},{name:'当直',special:null},
+  {name:'週休',special:'shukyu'},{name:'有給',special:'nenkyu'},
+];
+let shukyuKijun={1:8,2:8,3:8,4:8,5:8,6:8,7:8,8:8,9:8,10:8,11:8,12:8};
+let tochoDays={};
+// staffData[name][month][day] = {wish, limit, ng:Set, comment, kibou:shiftKey}
+let staffData={};
+let schedData={};
+let nenkyuData={};
+let icsSelMonths=new Set();
+let icsSelShifts=new Set();
+let year=2026,month=5;
+let currentStaff='';
+let currentMode='wish';
+let selectedDay=null;
+let kibouSelected=null; // selected shift key for kibou mode
+
+/* ══ HELPERS ══ */
+const daysInMonth=(y,m)=>new Date(y,m,0).getDate();
+const firstDow=(y,m)=>new Date(y,m-1,1).getDay(); // 0=Sun (Sunday-first)
+const getDow=(y,m,d)=>new Date(y,m-1,d).getDay();
+const isSat=(y,m,d)=>getDow(y,m,d)===6;
+const isSun=(y,m,d)=>getDow(y,m,d)===0;
+const isHol=(y,m,d)=>getHolidays(y,m).has(d);
+const cellCls=(y,m,d)=>isHol(y,m,d)?'hol':isSun(y,m,d)?'sun':isSat(y,m,d)?'sat':'normal';
+const shiftByKey=k=>SHIFTS.find(s=>s.k===k)||SHIFTS[SHIFTS.length-1];
+const isTochoDay=(m,d)=>(tochoDays[m] instanceof Set)&&tochoDays[m].has(d);
+
+function ensureDay(name,m,d){
+  if(!staffData[name])staffData[name]={};
+  if(!staffData[name][m])staffData[name][m]={};
+  if(!staffData[name][m][d])staffData[name][m][d]={wish:false,limit:false,ng:new Set(),comment:'',kibou:null};
+}
+function ensureSchedule(m){
+  if(!schedData[m])schedData[m]={};
+  const days=daysInMonth(year,m);
+  STAFF.forEach(name=>{
+    if(!schedData[m][name]){
+      schedData[m][name]=[];
+      for(let d=1;d<=days;d++)
+        schedData[m][name].push((isSat(year,m,d)||isSun(year,m,d)||isHol(year,m,d))?'shukyu':'nikkn');
+    }
+    while(schedData[m][name].length<days)schedData[m][name].push('nikkn');
+    if(schedData[m][name].length>days)schedData[m][name].length=days;
+  });
+}
+const getNenkyuFiscalYear=()=>month>=4?year:year-1;
+
+/* ══ SERIALIZE ══ */
+function serializeStaffData(sd){
+  const out={};
+  Object.entries(sd).forEach(([n,mv])=>{
+    out[n]={};
+    Object.entries(mv).forEach(([mo,dv])=>{
+      out[n][mo]={};
+      Object.entries(dv).forEach(([d,v])=>{out[n][mo][d]={...v,ng:[...(v.ng||[])]};});
+    });
+  });
+  return out;
+}
+function serializeTochoDays(){
+  const out={};Object.entries(tochoDays).forEach(([m,s])=>{out[m]=[...(s||[])];});return out;
+}
+
+/* ══ SAVE / LOAD (Firebase) ══ */
+function saveAll(){
+  // Firebaseにリアルタイム保存（window._fbSaveはtype=moduleで定義済み）
+  const payload={cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
+    tochoDays:serializeTochoDays(),
+    staffData:serializeStaffData(staffData),
+    schedData,nenkyuData,year,month};
+  if(typeof window._fbSave==='function') window._fbSave(payload);
+}
+function loadAll(){
+  // Firebase onValue で自動同期されるため、初期ロードはfalseを返してseedDemoを走らせる
+  // データがFirebaseにあれば_fbStartSync内で上書きされる
+  return false;
+}
+function exportData(){
+  const blob=new Blob([JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),schedData,nenkyuData,year,month},null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.json`;a.click();
+}
+function importData(e){
+  const file=e.target.files[0];if(!file)return;
+  const reader=new FileReader();
+  reader.onload=ev=>{
+    try{
+      const data=JSON.parse(ev.target.result);
+      if(data.cfg)cfg=data.cfg;if(data.STAFF)STAFF=data.STAFF;if(data.SHIFTS)SHIFTS=data.SHIFTS;
+      if(data.GROUPS)GROUPS=data.GROUPS;if(data.shukyuKijun)shukyuKijun=data.shukyuKijun;
+      if(data.tochoDays){tochoDays={};Object.entries(data.tochoDays).forEach(([m,a])=>{tochoDays[m]=new Set(a);});}
+      if(data.nenkyuData)nenkyuData=data.nenkyuData;if(data.schedData)schedData=data.schedData;
+      if(data.year)year=data.year;if(data.month)month=data.month;
+      if(data.staffData){staffData={};Object.entries(data.staffData).forEach(([n,mv])=>{staffData[n]={};Object.entries(mv).forEach(([mo,dv])=>{staffData[n][mo]={};Object.entries(dv).forEach(([d,v])=>{staffData[n][mo][d]={...v,ng:new Set(v.ng||[])};});});});}
+      saveAll();initAll();alert('データを読み込みました');
+    }catch(err){alert('読み込みに失敗しました');}
+  };
+  reader.readAsText(file);e.target.value='';
+}
+function clearData(){if(!confirm('すべてのデータを削除しますか？'))return;location.reload();}
+
+/* ══ SCREEN / MONTH ══ */
+function showScreen(s){
+  document.querySelectorAll('.scr').forEach(el=>el.classList.remove('on'));
+  document.querySelectorAll('.tab').forEach(el=>el.classList.remove('on'));
+  document.getElementById('scr-'+s).classList.add('on');
+  const tabs=document.querySelectorAll('.tab');
+  if(s==='staff')tabs[0].classList.add('on');
+  if(s==='admin')tabs[1].classList.add('on');
+  if(s==='settings')tabs[2].classList.add('on');
+  if(s==='admin'){ensureSchedule(month);renderAdmin();}
+  if(s==='settings')renderSettings();
+  if(s==='staff'){renderStaffCal();renderSummary();renderYkCard();renderICS();}
+}
+function changeMonth(dir){
+  month+=dir;if(month>12){month=1;year++;}if(month<1){month=12;year--;}
+  document.getElementById('month-label').textContent=`${year}年 ${month}月`;
+  selectedDay=null;kibouSelected=null;hideDetail();ensureSchedule(month);saveAll();
+  const active=document.querySelector('.scr.on').id;
+  if(active==='scr-staff'){renderStaffCal();renderSummary();renderYkCard();renderICS();}
+  if(active==='scr-admin')renderAdmin();
+  if(active==='scr-settings')renderTochoCal();
+}
+
+/* ══ STAFF SELECT ══ */
+function rebuildStaffSelect(){
+  const sel=document.getElementById('stf-sel');sel.innerHTML='';
+  STAFF.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});
+  currentStaff=STAFF[0]||'';sel.value=currentStaff;
+}
+function onStaffChange(){currentStaff=document.getElementById('stf-sel').value;selectedDay=null;kibouSelected=null;hideDetail();renderStaffCal();renderSummary();renderYkCard();}
+function setMode(m){
+  currentMode=m;
+  document.getElementById('pill-wish').classList.toggle('on',m==='wish');
+  document.getElementById('pill-limit').classList.toggle('on',m==='limit');
+  document.getElementById('pill-kibou').classList.toggle('on',m==='kibou');
+  const hints={wish:'タップで希望休を登録',limit:'日付をタップ → できない勤務を選択',kibou:'日付をタップ → 希望する勤務を選択'};
+  document.getElementById('mode-hint').textContent=hints[m];
+  if(m==='wish'){selectedDay=null;kibouSelected=null;hideDetail();renderStaffCal();}
+}
+
+/* ══ STAFF CALENDAR ══ */
+function renderStaffCal(){
+  const leg=document.getElementById('stf-cal-legend');
+  leg.innerHTML=`
+    <span class="leg" style="background:var(--s-wish);color:var(--f-wish)">● 希望休</span>
+    <span class="leg" style="background:var(--s-limit);color:var(--f-limit)">▲ 勤務条件</span>
+    <span class="leg" style="background:var(--s-kibou);color:var(--f-kibou)">★ 希望勤務</span>
+    <span class="leg" style="background:#dbeafe;color:#1e40af">土</span>
+    <span class="leg" style="background:#fee2e2;color:#991b1b">日・祝</span>`;
+  document.getElementById('sum-month').textContent=`${month}月`;
+  const grid=document.getElementById('stf-cal');grid.innerHTML='';
+  const fd=firstDow(year,month),days=daysInMonth(year,month);
+  const hols=getHolidays(year,month);
+  for(let i=0;i<fd;i++){const e=document.createElement('div');e.className='cal-cell empty';grid.appendChild(e);}
+  for(let d=1;d<=days;d++){
+    const dd=staffData[currentStaff]?.[month]?.[d]||{};
+    const cell=document.createElement('div');
+    let base=cellCls(year,month,d); // returns 'hol','sun','sat','normal'
+    let cls='cal-cell '+base;
+    const hasWish=dd.wish,hasLimit=dd.limit,hasKibou=!!dd.kibou;
+    if(hasWish&&hasKibou)cls+=' wish kibou';
+    else if(hasWish)cls+=' wish';
+    else if(hasKibou)cls+=' kibou';
+    else if(hasLimit)cls+=' limit';
+    if(d===selectedDay)cls+=' selected';
+    if(isTochoDay(month,d))cls+=' tocho-day';
+    cell.className=cls;
+    let txt=String(d);
+    if(hasWish)txt+='<span class="dot">●</span>';
+    if(hasKibou)txt+='<span class="dot" style="color:#166534">★'+(shiftByKey(dd.kibou).l)+'</span>';
+    else if(hasLimit&&!hasWish&&!hasKibou)txt+='<span class="dot">▲</span>';
+    cell.innerHTML=txt;
+    cell.onclick=()=>tapDay(d);
+    grid.appendChild(cell);
+  }
+}
+
+function tapDay(d){
+  if(!STAFF.length)return;
+  ensureDay(currentStaff,month,d);
+  const dd=staffData[currentStaff][month][d];
+
+  if(currentMode==='wish'){
+    dd.wish=!dd.wish;
+    // 希望休を管理者画面に即時反映
+    ensureSchedule(month);
+    if(dd.wish){
+      schedData[month][currentStaff][d-1]='shukyu';
+      // 警告チェック（平日のみ）
+      checkWishWarnings(currentStaff,month);
+    } else {
+      // 解除時は日勤に戻す（土日祝は週休のまま）
+      if(!isSat(year,month,d)&&!isSun(year,month,d)&&!isHol(year,month,d)){
+        schedData[month][currentStaff][d-1]='nikkn';
+      }
+    }
+    if(!dd.wish&&!dd.limit&&!dd.ng.size&&!dd.comment&&!dd.kibou)delete staffData[currentStaff][month][d];
+    saveAll();renderStaffCal();renderSummary();return;
+  }
+
+  if(currentMode==='kibou'){
+    selectedDay=d;kibouSelected=dd.kibou||null;
+    renderStaffCal();showDetailKibou(d,dd);return;
+  }
+
+  if(!dd.limit)dd.limit=true;
+  selectedDay=d;renderStaffCal();showDetailLimit(d,dd);
+}
+
+function checkWishWarnings(name,m){
+  const mData=staffData[name]?.[m]||{};
+  const wishDays=Object.entries(mData).filter(([,v])=>v.wish);
+  const limit=cfg.wishLimit||6;
+  const hols=getHolidays(year,m);
+  const weekdayWish=wishDays.filter(([d])=>!isSat(year,m,+d)&&!isSun(year,m,+d)&&!hols.has(+d));
+  if(weekdayWish.length>limit){
+    alert(`⚠ ${name} の希望休が月間上限（${limit}日）を超えています（現在${weekdayWish.length}日）`);
+  }
+  // 当直日との重複チェック
+  const tochoConflict=wishDays.filter(([d])=>isTochoDay(m,+d));
+  if(tochoConflict.length){
+    alert(`⚠ ${tochoConflict.map(([d])=>d+'日').join('・')} は当直日と重なっています`);
+  }
+  // 1日あたり人数上限チェック（平日のみ）
+  const dayLimit=cfg.wishDayLimit||2;
+  wishDays.forEach(([d])=>{
+    if(isSat(year,m,+d)||isSun(year,m,+d)||hols.has(+d))return;
+    const cnt=STAFF.filter(n=>{return staffData[n]?.[m]?.[+d]?.wish;}).length;
+    if(cnt>dayLimit){
+      alert(`⚠ ${m}月${d}日 の希望休が1日あたりの上限（${dayLimit}名）を超えています（現在${cnt}名）`);
+    }
+  });
+}
+
+function showDetailLimit(d,dd){
+  const w=getDow(year,month,d);
+  document.getElementById('detail-title').textContent=`${month}月${d}日（${DOW[w]}）の勤務条件`;
+  document.getElementById('detail-empty').style.display='none';
+  document.getElementById('detail-body').style.display='block';
+  document.getElementById('db-wish').style.display='none';
+  document.getElementById('db-limit').style.display='block';
+  document.getElementById('db-kibou').style.display='none';
+  document.getElementById('comment-inp').value=dd.comment||'';
+  const btns=document.getElementById('ng-btns');btns.innerHTML='';
+  SHIFTS.filter(s=>s.visible&&!['empty','shukyu','nenkyu','ampms','ampmn'].includes(s.k)).forEach(s=>{
+    const btn=document.createElement('button');
+    btn.className='ng-btn '+(dd.ng.has(s.k)?'ng':'ok');
+    btn.style.background=s.bg;btn.style.color=s.fg;
+    btn.textContent=(dd.ng.has(s.k)?'✕ ':'')+s.l;
+    btn.onclick=()=>{if(dd.ng.has(s.k))dd.ng.delete(s.k);else dd.ng.add(s.k);showDetailLimit(d,dd);};
+    btns.appendChild(btn);
+  });
+}
+
+function showDetailKibou(d,dd){
+  const w=getDow(year,month,d);
+  document.getElementById('detail-title').textContent=`${month}月${d}日（${DOW[w]}）の希望勤務`;
+  document.getElementById('detail-empty').style.display='none';
+  document.getElementById('detail-body').style.display='block';
+  document.getElementById('db-wish').style.display='none';
+  document.getElementById('db-limit').style.display='none';
+  document.getElementById('db-kibou').style.display='block';
+  const btns=document.getElementById('kibou-btns');btns.innerHTML='';
+  SHIFTS.filter(s=>s.visible&&s.k!=='empty').forEach(s=>{
+    const btn=document.createElement('button');
+    btn.className='kibou-sh'+(kibouSelected===s.k?' selected':'');
+    btn.style.background=s.bg;btn.style.color=s.fg;
+    btn.textContent=s.l;
+    btn.onclick=()=>{kibouSelected=(kibouSelected===s.k)?null:s.k;showDetailKibou(d,dd);};
+    btns.appendChild(btn);
+  });
+}
+
+function hideDetail(){
+  document.getElementById('detail-title').textContent='日付を選択してください';
+  document.getElementById('detail-empty').style.display='';
+  document.getElementById('detail-body').style.display='none';
+}
+
+function saveCondition(){
+  if(!selectedDay)return;
+  ensureDay(currentStaff,month,selectedDay);
+  const dd=staffData[currentStaff][month][selectedDay];
+  dd.comment=document.getElementById('comment-inp').value.trim();
+  if(!dd.ng.size&&!dd.comment)dd.limit=false;
+  if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][month][selectedDay];
+  selectedDay=null;hideDetail();saveAll();renderStaffCal();renderSummary();
+}
+
+function saveKibou(){
+  if(!selectedDay)return;
+  ensureDay(currentStaff,month,selectedDay);
+  const dd=staffData[currentStaff][month][selectedDay];
+  dd.kibou=kibouSelected;
+  // 管理者カレンダーに直接反映
+  ensureSchedule(month);
+  if(kibouSelected){
+    schedData[month][currentStaff][selectedDay-1]=kibouSelected;
+    // 当直 → 翌日を明けに自動セット（設定がONの場合）
+    if(kibouSelected==='tocho'&&cfg.autoAke!==false){
+      const totalDays=daysInMonth(year,month);
+      if(selectedDay<totalDays){
+        schedData[month][currentStaff][selectedDay]='ake';
+      } else {
+        const nm=month===12?1:month+1;
+        ensureSchedule(nm);
+        if(schedData[nm][currentStaff])schedData[nm][currentStaff][0]='ake';
+      }
+    }
+  } else {
+    // 解除時：希望休なら週休、土日祝なら週休、それ以外は日勤
+    const d=selectedDay;
+    if(dd.wish){schedData[month][currentStaff][d-1]='shukyu';}
+    else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){schedData[month][currentStaff][d-1]='shukyu';}
+    else{schedData[month][currentStaff][d-1]='nikkn';}
+  }
+  if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][month][selectedDay];
+  selectedDay=null;kibouSelected=null;hideDetail();saveAll();renderStaffCal();renderSummary();
+}
+
+function renderSummary(){
+  const list=document.getElementById('sum-list');list.innerHTML='';
+  const mData=staffData[currentStaff]?.[month]||{};
+  const entries=Object.entries(mData).filter(([,v])=>v.wish||v.limit||v.kibou).sort(([a],[b])=>+a-+b);
+  if(!entries.length){list.innerHTML='<div class="side-empty">まだ登録がありません</div>';return;}
+  entries.forEach(([d,v])=>{
+    const dow=DOW[getDow(year,month,+d)];
+    const ngText=v.limit&&v.ng.size?[...v.ng].map(k=>shiftByKey(k).l).join('・')+'不可':'';
+    const item=document.createElement('div');item.className='sum-item';
+    item.innerHTML=`
+      <span class="sum-date">${d}日(${dow})</span>
+      <div class="sum-tags">
+        ${v.wish?`<span class="sum-type" style="background:var(--s-wish);color:var(--f-wish)">希望休</span>`:''}
+        ${v.kibou?`<span class="sum-type" style="background:var(--s-kibou);color:var(--f-kibou)">★ ${shiftByKey(v.kibou).l}</span>`:''}
+        ${v.limit?`<span class="sum-type" style="background:var(--s-limit);color:var(--f-limit)">条件${ngText?': '+ngText:''}</span>`:''}
+        ${v.comment?`<div class="sum-comment">${v.comment}</div>`:''}
+      </div>
+      <span class="sum-del" onclick="deleteEntry(${d})">×</span>`;
+    list.appendChild(item);
+  });
+}
+
+function deleteEntry(d){
+  const hadKibou=staffData[currentStaff]?.[month]?.[d]?.kibou;
+  if(staffData[currentStaff]?.[month])delete staffData[currentStaff][month][d];
+  // 希望休・希望勤務が削除されたら管理者画面も戻す
+  if(schedData[month]&&schedData[month][currentStaff]){
+    if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){
+      schedData[month][currentStaff][d-1]='shukyu';
+    } else {
+      schedData[month][currentStaff][d-1]='nikkn';
+    }
+  }
+  if(selectedDay===+d){selectedDay=null;kibouSelected=null;hideDetail();}
+  saveAll();renderStaffCal();renderSummary();
+}
+
+/* ══ NENKYU CARD ══ */
+function calcNenkyu(name){
+  const nd=nenkyuData[name]||{grant:0,carry:0};
+  let consumed=0;
+  for(let mo=1;mo<=12;mo++){
+    const sched=schedData[mo]?.[name];if(!sched)continue;
+    sched.forEach(k=>{if(k==='nenkyu')consumed+=1;if(k==='ampmn')consumed+=0.5;});
+  }
+  const total=(nd.grant||0)+(nd.carry||0);
+  const carryUsed=Math.min(consumed,nd.carry||0);
+  const grantUsed=Math.max(0,consumed-(nd.carry||0));
+  return{grant:nd.grant||0,carry:nd.carry||0,total,consumed,carryUsed,grantUsed,
+    carryRem:Math.max(0,(nd.carry||0)-carryUsed),grantRem:Math.max(0,(nd.grant||0)-grantUsed),
+    remain:Math.max(0,(nd.carry||0)-carryUsed)+Math.max(0,(nd.grant||0)-grantUsed)};
+}
+function renderYkCard(){
+  const fy=getNenkyuFiscalYear();
+  document.getElementById('yk-year').textContent=fy;
+  const nk=calcNenkyu(currentStaff);
+  document.getElementById('yk-carry').textContent=nk.carry+'日';
+  document.getElementById('yk-carry-sub').textContent=`残${nk.carryRem}日（消化${nk.carryUsed}日）`;
+  document.getElementById('yk-grant').textContent=nk.grant+'日';
+  document.getElementById('yk-grant-sub').textContent=`残${nk.grantRem}日（消化${nk.grantUsed}日）`;
+  document.getElementById('yk-consumed').textContent=nk.consumed+'日';
+  document.getElementById('yk-consumed-sub').textContent=`繰越${nk.carryUsed}日 + 本年度${nk.grantUsed}日`;
+  document.getElementById('yk-total').textContent=nk.total+'日';
+  document.getElementById('yk-total-sub').textContent=`繰越${nk.carryRem}日 + 本年度${nk.grantRem}日`;
+  const remTxt=nk.remain>=0?`残${nk.remain}日`:`超過${Math.abs(nk.remain)}日`;
+  const remEl=document.getElementById('yk-remain');
+  remEl.textContent=remTxt;remEl.style.color=nk.remain<0?'#991b1b':nk.remain<=5?'#92400e':'#27500A';
+  const pct=nk.total>0?100/nk.total:0;
+  document.getElementById('bar-carry').style.width=Math.min(nk.carryUsed*pct,100)+'%';
+  document.getElementById('bar-curr').style.width=Math.min(nk.grantUsed*pct,100)+'%';
+}
+
+/* ══ ICS ══ */
+function renderICS(){
+  const el=document.getElementById('ics-months');el.innerHTML='';
+  for(let m=1;m<=12;m++){
+    const chip=document.createElement('span');chip.className='ics-chip'+(icsSelMonths.has(m)?' on':'');
+    chip.textContent=m+'月';chip.onclick=()=>{if(icsSelMonths.has(m))icsSelMonths.delete(m);else icsSelMonths.add(m);renderICS();};
+    el.appendChild(chip);
+  }
+  const sel=document.getElementById('ics-shifts');sel.innerHTML='';
+  SHIFTS.filter(s=>s.visible&&s.k!=='empty').forEach(s=>{
+    const btn=document.createElement('span');btn.className='ics-sh-btn'+(icsSelShifts.has(s.k)?' on':' off');
+    btn.style.background=s.bg;btn.style.color=s.fg;btn.textContent=s.l;
+    btn.onclick=()=>{if(icsSelShifts.has(s.k))icsSelShifts.delete(s.k);else icsSelShifts.add(s.k);renderICS();};
+    sel.appendChild(btn);
+  });
+}
+function downloadICS(){
+  if(!icsSelMonths.size){alert('取り込む月を選択してください');return;}
+  if(!icsSelShifts.size){alert('取り込む勤務種別を選択してください');return;}
+  let ics='BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//'+cfg.title+' 勤務表//\r\nCALSCALE:GREGORIAN\r\n';
+  [...icsSelMonths].sort((a,b)=>a-b).forEach(m=>{
+    const sched=schedData[m]?.[currentStaff];if(!sched)return;
+    const days=daysInMonth(year,m);
+    for(let d=1;d<=days;d++){
+      const k=sched[d-1];if(!icsSelShifts.has(k))continue;
+      const sh=shiftByKey(k);
+      const dt=`${year}${String(m).padStart(2,'0')}${String(d).padStart(2,'0')}`;
+      const dtEnd=new Date(year,m-1,d+1);
+      const dtEndStr=`${dtEnd.getFullYear()}${String(dtEnd.getMonth()+1).padStart(2,'0')}${String(dtEnd.getDate()).padStart(2,'0')}`;
+      ics+=`BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:${dt}\r\nDTEND;VALUE=DATE:${dtEndStr}\r\nSUMMARY:${cfg.title}\u3000${sh.l}\r\nUID:${dt}-${k}@kinmuhyo\r\nEND:VEVENT\r\n`;
+    }
+  });
+  ics+='END:VCALENDAR';
+  const blob=new Blob([ics],{type:'text/calendar;charset=utf-8'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${currentStaff.split(' ')[0]}.ics`;a.click();
+}
+
+/* ══ ADMIN ══ */
+function renderAdmin(){
+  ensureSchedule(month);
+  const days=daysInMonth(year,month);
+  const hols=getHolidays(year,month);
+  const legEl=document.getElementById('admin-legend');legEl.innerHTML='';
+  SHIFTS.filter(s=>s.visible).forEach(s=>{
+    const span=document.createElement('span');span.className='leg';span.style.background=s.bg;span.style.color=s.fg;span.textContent=s.l;legEl.appendChild(span);
+  });
+  ['<span class="leg" style="background:var(--s-wish);color:var(--f-wish)">●希望休</span>',
+   '<span class="leg" style="background:var(--s-kibou);color:var(--f-kibou)">★希望勤務</span>',
+   '<span class="leg" style="background:var(--s-limit);color:var(--f-limit)">▲条件</span>',
+   '<span class="leg" style="outline:2px solid #dc2626;background:#fee2e2;color:#991b1b">⚠違反</span>',
+  ].forEach(h=>legEl.insertAdjacentHTML('beforeend',h));
+
+  const thead=document.getElementById('admin-thead');thead.innerHTML='';
+  const tr=document.createElement('tr');
+  const thN=document.createElement('th');thN.className='th-name';thN.textContent='氏名';tr.appendChild(thN);
+  for(let d=1;d<=days;d++){
+    const isHolDay=hols.has(d);const isTD=isTochoDay(month,d);const th=document.createElement('th');
+    th.className='th-day'+(isSat(year,month,d)?' th-sat':isSun(year,month,d)?' th-sun':isHolDay?' th-hol':'')+(isTD?' th-tocho':'');
+    th.innerHTML=`${d}<br><span style="font-size:9px">${DOW[getDow(year,month,d)]}</span>${isHolDay?'<br><span style="font-size:7px">祝</span>':''}${isTD?'<br><span style="font-size:7px">当</span>':''}`;
+    tr.appendChild(th);
+  }
+  GROUPS.forEach(g=>{
+    const th=document.createElement('th');th.className='th-sum';th.textContent=g.name+'計';tr.appendChild(th);
+    if(g.special==='nenkyu'){const th2=document.createElement('th');th2.className='th-sum';th2.textContent='有給残';tr.appendChild(th2);}
+  });
+  thead.appendChild(tr);
+
+  const tbody=document.getElementById('admin-tbody');tbody.innerHTML='';
+  const conflicts=[];
+  STAFF.forEach(name=>{
+    const row=document.createElement('tr');
+    const tdN=document.createElement('td');tdN.className='td-name';tdN.textContent=name.split(' ')[0];row.appendChild(tdN);
+    const grpSums={};GROUPS.forEach(g=>{grpSums[g.name]=0;});
+    for(let d=1;d<=days;d++){
+      const k=(schedData[month][name]&&schedData[month][name][d-1])||'empty';
+      const sh=shiftByKey(k);
+      const dd=staffData[name]?.[month]?.[d]||{};
+      const isConflict=dd.ng&&dd.ng.has&&dd.ng.has(k);
+      const td=document.createElement('td');td.className='cell';
+      if(isConflict){td.classList.add('conflict');conflicts.push(`${name.split(' ')[0]} ${month}/${d}`);}
+      if(dd.wish)td.classList.add('wish-mark');
+      if(dd.kibou)td.classList.add('kibou-mark');
+      if(dd.limit&&!dd.wish&&!dd.kibou)td.classList.add('limit-mark');
+      td.style.background=sh.bg;td.style.color=sh.fg;td.textContent=sh.l;
+      let tip='';
+      if(dd.wish)tip+='希望休\n';
+      if(dd.kibou)tip+=`希望勤務: ${shiftByKey(dd.kibou).l}\n`;
+      if(dd.limit){const ngN=dd.ng&&dd.ng.size?[...dd.ng].map(k2=>shiftByKey(k2).l).join('・'):'';if(ngN)tip+=ngN+'は不可\n';if(dd.comment)tip+=dd.comment;}
+      if(tip)td.title=tip.trim();
+      td.onclick=e=>openPicker(name,d,td,e);row.appendChild(td);
+      if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined)grpSums[sh.group]+=sh.count||0;
+    }
+    GROUPS.forEach(g=>{
+      const v=grpSums[g.name]||0;
+      const td=document.createElement('td');td.className='td-sum';
+      const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
+      if(sh0){td.style.background=sh0.bg;td.style.color=sh0.fg;}
+      if(g.special==='shukyu'){
+        const kijun=shukyuKijun[month]||8;const diff=v-kijun;
+        const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
+        td.textContent=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
+        td.className='td-sum '+(diff>0?'c-over':diff===0?'c-ok':'c-neu');
+      } else {td.textContent=Number.isInteger(v)?v:v.toFixed(1);}
+      row.appendChild(td);
+      if(g.special==='nenkyu'){
+        const nk=calcNenkyu(name);const td2=document.createElement('td');
+        td2.textContent=nk.remain<0?`${nk.remain}日`:`残${nk.remain}日`;
+        td2.className='td-sum '+(nk.remain<0?'c-over':nk.remain<=5?'c-warn':'c-ok');row.appendChild(td2);
+      }
+    });
+    tbody.appendChild(row);
+  });
+
+  const tfoot=document.getElementById('admin-tfoot');tfoot.innerHTML='';
+  // 当直数行
+  const ftr=document.createElement('tr');
+  const ftd=document.createElement('td');ftd.className='td-name';ftd.textContent='当直数';ftr.appendChild(ftd);
+  for(let d=1;d<=days;d++){
+    const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='tocho').length;
+    const isTD=isTochoDay(month,d);const td=document.createElement('td');
+    td.style.cssText='font-weight:500;font-size:10px;text-align:center;padding:3px 2px';td.textContent=cnt;
+    if(isTD){td.style.background=cnt>=2?'#dcfce7':'#fee2e2';td.style.color=cnt>=2?'#166534':'#991b1b';}
+    else{td.style.background='#f0efe9';td.style.color='#a09e97';}
+    ftr.appendChild(td);
+  }
+  GROUPS.forEach(g=>{ftr.appendChild(document.createElement('td'));if(g.special==='nenkyu')ftr.appendChild(document.createElement('td'));});
+  tfoot.appendChild(ftr);
+  // 待機者行
+  const ftr2=document.createElement('tr');ftr2.className='taiki-row';
+  const ftd2=document.createElement('td');ftd2.className='td-name';ftd2.style.cssText='font-size:10px;color:#166534;font-weight:500;padding:3px 6px;background:#f0fdf4';ftd2.textContent='待機者';ftr2.appendChild(ftd2);
+  for(let d=1;d<=days;d++){
+    const isTD=isTochoDay(month,d);const td=document.createElement('td');td.className='taiki-name-cell';
+    if(!isTD){const ts=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki');td.textContent=ts.map(n=>n.split(' ')[0]).join(' ');td.title=ts.join('、');}
+    else{td.textContent='—';td.style.color='#a09e97';}
+    ftr2.appendChild(td);
+  }
+  GROUPS.forEach(g=>{ftr2.appendChild(document.createElement('td'));if(g.special==='nenkyu')ftr2.appendChild(document.createElement('td'));});
+  tfoot.appendChild(ftr2);
+
+  // alerts
+  const ab=document.getElementById('alert-bar');const msgs=[];
+  const uniqueC=[...new Set(conflicts)];const tochoAlert=[],taikiAlert=[];
+  for(let d=1;d<=days;d++){
+    if(isTochoDay(month,d)){
+      const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='tocho').length;
+      if(cnt<2)tochoAlert.push(`${d}日(${cnt}名)`);
+    } else if(!isSat(year,month,d)&&!isSun(year,month,d)&&!hols.has(d)){
+      const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki').length;
+      if(cnt<1)taikiAlert.push(d+'日');
+    }
+  }
+  if(tochoAlert.length)msgs.push(`当直不足(2名未満): ${tochoAlert.join('・')}`);
+  if(taikiAlert.length)msgs.push(`待機者なし(平日): ${taikiAlert.join('・')}`);
+  if(uniqueC.length)msgs.push(`条件違反⚠: ${uniqueC.join('、')}`);
+  // 希望休 1日あたり上限超過チェック
+  const dayLimit=cfg.wishDayLimit||2;
+  const wishOverDays=[];
+  for(let d=1;d<=days;d++){
+    if(isSat(year,month,d)||isSun(year,month,d)||hols.has(d))continue;
+    const cnt=STAFF.filter(n=>staffData[n]?.[month]?.[d]?.wish).length;
+    if(cnt>dayLimit)wishOverDays.push(`${d}日(${cnt}名)`);
+  }
+  if(wishOverDays.length)msgs.push(`希望休 上限超過(平日${dayLimit}名まで): ${wishOverDays.join('・')}`);
+  if(msgs.length){ab.innerHTML=msgs.join('<br>');ab.classList.add('on');}else ab.classList.remove('on');
+
+  const bar=document.getElementById('stat-bar');bar.innerHTML='';
+  const totalTocho=STAFF.reduce((a,n)=>a+(schedData[month][n]?schedData[month][n].filter(k=>k==='tocho').length:0),0);
+  const wishCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[month]||{}).filter(v=>v.wish).length,0);
+  const kibouCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[month]||{}).filter(v=>v.kibou).length,0);
+  [{label:'当直計',val:totalTocho,sub:'今月',col:'#991b1b'},
+   {label:'希望休',val:wishCnt,sub:'件',col:'#854d0e'},
+   {label:'希望勤務',val:kibouCnt,sub:'件',col:'#166534'},
+   {label:'条件違反',val:uniqueC.length,sub:'要確認',col:uniqueC.length?'#dc2626':'#166534'},
+  ].forEach(s=>{
+    const el=document.createElement('div');el.className='stat';
+    el.innerHTML=`<div class="stat-label">${s.label}</div><div class="stat-val" style="color:${s.col}">${s.val}</div><div class="stat-sub">${s.sub}</div>`;
+    bar.appendChild(el);
+  });
+}
+
+function resetMonth(){
+  if(!confirm(`${month}月の勤務割り当てをリセットします。\n希望休・希望勤務・勤務条件のデータは保持されます。\n\nよろしいですか？`))return;
+  const days=daysInMonth(year,month);
+  STAFF.forEach(name=>{
+    schedData[month][name]=[];
+    for(let d=1;d<=days;d++){
+      const dd=staffData[name]?.[month]?.[d]||{};
+      // 希望休は週休として反映
+      if(dd.wish)schedData[month][name].push('shukyu');
+      else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d))schedData[month][name].push('shukyu');
+      else schedData[month][name].push('nikkn');
+    }
+  });
+  saveAll();renderAdmin();
+}
+
+function exportExcel(){
+  if(typeof ExcelJS==='undefined'){alert('ExcelJSの読み込みに失敗しました。インターネット接続を確認してください。');return;}
+  ensureSchedule(month);
+  const days=daysInMonth(year,month);
+  const hols=getHolidays(year,month);
+
+  // 色をARGBに変換（#rrggbb → 'FFrrggbb'）
+  const argb=c=>'FF'+(c||'#f0efe9').replace('#','').toUpperCase();
+
+  // セルスタイル生成ヘルパー
+  const makeStyle=(bg,fg,bold=false,align='center')=>({
+    fill:{type:'pattern',pattern:'solid',fgColor:{argb:argb(bg)}},
+    font:{color:{argb:argb(fg)},bold,name:'Noto Sans JP',size:9},
+    alignment:{horizontal:align,vertical:'middle',wrapText:false},
+    border:{top:{style:'thin',color:{argb:'FFE2E0D8'}},bottom:{style:'thin',color:{argb:'FFE2E0D8'}},left:{style:'thin',color:{argb:'FFE2E0D8'}},right:{style:'thin',color:{argb:'FFE2E0D8'}}}
+  });
+
+  const wb=new ExcelJS.Workbook();
+  const ws=wb.addWorksheet(`${month}月`,{
+    pageSetup:{paperSize:9,orientation:'landscape',fitToPage:true,fitToWidth:1,fitToHeight:0}
+  });
+  ws.pageSetup.margins={left:0.5,right:0.5,top:0.75,bottom:0.75,header:0.3,footer:0.3};
+
+  const totalCols=1+days+GROUPS.reduce((a,g)=>a+1+(g.special==='nenkyu'?1:0),0);
+
+  // 列幅設定
+  ws.getColumn(1).width=10;
+  for(let d=1;d<=days;d++)ws.getColumn(1+d).width=5.5;
+  let ci=2+days;
+  GROUPS.forEach(g=>{ws.getColumn(ci++).width=8;if(g.special==='nenkyu')ws.getColumn(ci++).width=7;});
+
+  // ── 行1: タイトル（結合はstyle設定後に行う）──
+  const titleRow=ws.getRow(1);
+  titleRow.height=22;
+  const titleCell=titleRow.getCell(1);
+  titleCell.value=`${cfg.title} 勤務表 ${year}年${month}月`;
+  // 先にstyleをセット、結合後に再セット
+  const titleStyle=makeStyle('#1a1917','#ffffff',true,'center');
+  titleCell.style=titleStyle;
+  ws.mergeCells(1,1,1,totalCols);
+  // ExcelJSは結合後にマスターセルへ再度styleをセット
+  ws.getCell(1,1).style=titleStyle;
+
+  // ── 行2: ヘッダー ──
+  const hdrRow=ws.getRow(2);
+  hdrRow.height=20;
+  hdrRow.getCell(1).value='氏名';
+  hdrRow.getCell(1).style=makeStyle('#f0efe9','#6b6860',true,'center');
+  for(let d=1;d<=days;d++){
+    const isTD=isTochoDay(month,d),isH=hols.has(d),isS=isSat(year,month,d),isSn=isSun(year,month,d);
+    const bg=isTD?'#ffedd5':isH?'#fff3cd':isS?'#dbeafe':isSn?'#fee2e2':'#f0efe9';
+    const fg=isTD?'#c2410c':isH?'#b45309':isS?'#1e40af':isSn?'#991b1b':'#6b6860';
+    const cell=hdrRow.getCell(1+d);
+    cell.value=`${d}(${DOW[getDow(year,month,d)]})`;
+    cell.style=makeStyle(bg,fg,true,'center');
+  }
+  let hci=2+days;
+  GROUPS.forEach(g=>{
+    hdrRow.getCell(hci).value=g.name+'計';
+    hdrRow.getCell(hci).style=makeStyle('#e0e7ff','#3730a3',true,'center');
+    hci++;
+    if(g.special==='nenkyu'){
+      hdrRow.getCell(hci).value='有給残';
+      hdrRow.getCell(hci).style=makeStyle('#e0e7ff','#3730a3',true,'center');
+      hci++;
+    }
+  });
+
+  // ── スタッフ行 ──
+  STAFF.forEach((name,si)=>{
+    const row=ws.getRow(3+si);
+    row.height=16;
+    const grpSums={};GROUPS.forEach(g=>{grpSums[g.name]=0;});
+
+    // 氏名列
+    row.getCell(1).value=name;
+    row.getCell(1).style=makeStyle('#f0efe9','#57534e',true,'left');
+
+    // 勤務セル
+    for(let d=1;d<=days;d++){
+      const k=(schedData[month][name]&&schedData[month][name][d-1])||'empty';
+      const sh=shiftByKey(k);
+      const cell=row.getCell(1+d);
+      cell.value=sh.l;
+      cell.style=makeStyle(sh.bg,sh.fg,false,'center');
+      if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined)grpSums[sh.group]+=sh.count||0;
+    }
+
+    // 集計列
+    let sci=2+days;
+    GROUPS.forEach(g=>{
+      const v=grpSums[g.name]||0;
+      const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
+      const gbg=sh0?sh0.bg:'#f0efe9';const gfg=sh0?sh0.fg:'#57534e';
+      const gcell=row.getCell(sci);
+      if(g.special==='shukyu'){
+        const kijun=shukyuKijun[month]||8;const diff=v-kijun;
+        const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
+        gcell.value=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
+      } else {gcell.value=Number.isInteger(v)?v:v.toFixed(1);}
+      gcell.style=makeStyle(gbg,gfg,true,'center');
+      sci++;
+      if(g.special==='nenkyu'){
+        const nk=calcNenkyu(name);
+        const nkCell=row.getCell(sci);
+        nkCell.value=nk.remain<0?`${nk.remain}日`:`残${nk.remain}日`;
+        const nbg=nk.remain<0?'#FCEBEB':nk.remain<=5?'#FAEEDA':'#EAF3DE';
+        const nfg=nk.remain<0?'#A32D2D':nk.remain<=5?'#854F0B':'#27500A';
+        nkCell.style=makeStyle(nbg,nfg,true,'center');
+        sci++;
+      }
+    });
+  });
+
+  // ── 当直数行 ──
+  const tochoRow=ws.getRow(3+STAFF.length);
+  tochoRow.height=16;
+  tochoRow.getCell(1).value='当直数';
+  tochoRow.getCell(1).style=makeStyle('#f0efe9','#57534e',true,'left');
+  for(let d=1;d<=days;d++){
+    const isTD=isTochoDay(month,d);
+    const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='tocho').length;
+    const cell=tochoRow.getCell(1+d);
+    if(isTD){
+      cell.value=cnt;
+      cell.style=makeStyle(cnt>=2?'#dcfce7':'#fee2e2',cnt>=2?'#166534':'#991b1b',true,'center');
+    } else {
+      cell.value='';
+      cell.style=makeStyle('#f0efe9','#a09e97',false,'center');
+    }
+  }
+
+  // ── 待機者行 ──
+  const taikiRow=ws.getRow(4+STAFF.length);
+  taikiRow.height=16;
+  taikiRow.getCell(1).value='待機者';
+  taikiRow.getCell(1).style=makeStyle('#f0fdf4','#166534',true,'left');
+  for(let d=1;d<=days;d++){
+    const cell=taikiRow.getCell(1+d);
+    if(!isTochoDay(month,d)){
+      const ts=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki');
+      cell.value=ts.map(n=>n.split(' ')[0]).join(' ');
+    } else {cell.value='';}
+    cell.style=makeStyle('#f0fdf4','#166534',false,'center');
+  }
+
+  // ── ダウンロード ──
+  wb.xlsx.writeBuffer().then(buf=>{
+    const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.xlsx`;a.click();
+  }).catch(e=>{alert('Excel出力に失敗しました: '+e.message);});
+}
+function openPicker(name,d,td,e){
+  const dd=staffData[name]?.[month]?.[d]||{};
+  const ngSet=dd.ng||new Set();
+  const info=document.getElementById('pk-info');
+  const dow=DOW[getDow(year,month,d)];
+  let html=`<strong>${name.split(' ')[0]}　${month}/${d}（${dow}）</strong>`;
+  if(dd.wish)html+=`<br><span style="color:var(--f-wish)">● 希望休あり</span>`;
+  if(dd.kibou)html+=`<br><span style="color:var(--f-kibou)">★ 希望勤務: ${shiftByKey(dd.kibou).l}</span>`;
+  if(dd.limit){const ngN=[...ngSet].map(k=>shiftByKey(k).l).join('・');if(ngN)html+=`<div class="pk-conflict">▲ ${ngN}は不可</div>`;if(dd.comment)html+=`<div class="pk-comment">${dd.comment}</div>`;}
+  if(dd.wish||dd.kibou||dd.limit){info.innerHTML=html;info.classList.add('on');}else info.classList.remove('on');
+  const shiftsEl=document.getElementById('pk-shifts');shiftsEl.innerHTML='';
+  SHIFTS.filter(s=>s.visible).forEach(s=>{
+    const isCf=ngSet.has(s.k);
+    const btn=document.createElement('button');btn.className='pk-btn'+(isCf?' cf':'');
+    btn.style.background=s.bg;btn.style.color=s.fg;btn.textContent=(isCf?'⚠ ':'')+s.l;
+    btn.onclick=()=>{assignShift(name,d,s.k);closePicker();renderAdmin();};
+    shiftsEl.appendChild(btn);
+  });
+  document.getElementById('pk-overlay').classList.add('on');
+}
+function closePicker(){document.getElementById('pk-overlay').classList.remove('on');}
+function assignShift(name,d,k){
+  if(!schedData[month])schedData[month]={};ensureSchedule(month);
+  schedData[month][name][d-1]=k;
+  if(k==='tocho'&&cfg.autoAke){
+    const days=daysInMonth(year,month);
+    if(d<days){schedData[month][name][d]='ake';}
+    else{const nm=month===12?1:month+1;ensureSchedule(nm);if(schedData[nm][name])schedData[nm][name][0]='ake';}
+  }
+  saveAll();
+}
+
+/* ══ SETTINGS ══ */
+function showSetPanel(p){
+  document.querySelectorAll('.set-panel').forEach(el=>el.classList.remove('on'));
+  document.querySelectorAll('.set-nav-btn').forEach(el=>el.classList.remove('on'));
+  document.getElementById('sp-'+p).classList.add('on');
+  const map={basic:0,staff:1,shifts:2,shukyu:3,tocho:4,nenkyu:5,data:6};
+  document.querySelectorAll('.set-nav-btn')[map[p]||0].classList.add('on');
+  if(p==='staff')renderStaffMgr();if(p==='shifts')renderShiftList();if(p==='shukyu')renderShukyuKijun();
+  if(p==='tocho')renderTochoCal();if(p==='nenkyu')renderNenkyuPanel();
+}
+function renderSettings(){
+  document.getElementById('cfg-title').value=cfg.title;
+  document.getElementById('cfg-auto-ake').checked=cfg.autoAke!==false;
+  document.getElementById('cfg-wish-limit').value=cfg.wishLimit||6;
+  document.getElementById('cfg-wish-day-limit').value=cfg.wishDayLimit||2;
+}
+function saveCfg(){
+  cfg.title=document.getElementById('cfg-title').value||'放射線科';
+  cfg.autoAke=document.getElementById('cfg-auto-ake').checked;
+  cfg.wishLimit=parseInt(document.getElementById('cfg-wish-limit').value)||6;
+  cfg.wishDayLimit=parseInt(document.getElementById('cfg-wish-day-limit').value)||2;
+  document.getElementById('logo-text').innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
+  saveAll();
+}
+function editTitle(){const t=prompt('タイトルを入力してください',cfg.title);if(t!==null){cfg.title=t;document.getElementById('cfg-title').value=t;saveCfg();}}
+
+/* ── Staff Manager ── */
+let dragSrcIdx=null;
+function renderStaffMgr(){
+  const list=document.getElementById('staff-mgr-list');list.innerHTML='';
+  STAFF.forEach((name,i)=>{
+    const item=document.createElement('div');item.className='staff-mgr-item';item.draggable=true;item.dataset.idx=i;
+    item.innerHTML=`<span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">${name}</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(${i},-1)">▲</button><button class="smgr-mv" onclick="moveStaff(${i},1)">▼</button><button class="smgr-del" onclick="removeStaff(${i})">削除</button></div>`;
+    item.addEventListener('dragstart',e=>{dragSrcIdx=i;item.classList.add('dragging');e.dataTransfer.effectAllowed='move';});
+    item.addEventListener('dragend',()=>{item.classList.remove('dragging');document.querySelectorAll('.staff-mgr-item').forEach(el=>el.classList.remove('drag-over'));});
+    item.addEventListener('dragover',e=>{e.preventDefault();item.classList.add('drag-over');});
+    item.addEventListener('dragleave',()=>item.classList.remove('drag-over'));
+    item.addEventListener('drop',e=>{e.preventDefault();item.classList.remove('drag-over');if(dragSrcIdx===null||dragSrcIdx===i)return;const moved=STAFF.splice(dragSrcIdx,1)[0];STAFF.splice(i,0,moved);dragSrcIdx=null;saveAll();rebuildStaffSelect();renderStaffMgr();});
+    list.appendChild(item);
+  });
+  if(!STAFF.length)list.innerHTML='<div class="side-empty">スタッフがいません</div>';
+}
+function moveStaff(i,dir){const j=i+dir;if(j<0||j>=STAFF.length)return;[STAFF[i],STAFF[j]]=[STAFF[j],STAFF[i]];saveAll();rebuildStaffSelect();renderStaffMgr();}
+function addStaff(){
+  const inp=document.getElementById('add-staff-inp');const name=inp.value.trim();if(!name)return;
+  if(STAFF.includes(name)){alert('同じ名前のスタッフがすでにいます');return;}
+  STAFF.push(name);if(!staffData[name])staffData[name]={};if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0};
+  Object.keys(schedData).forEach(m=>{if(!schedData[m][name]){const days=daysInMonth(year,+m);schedData[m][name]=[];for(let d=1;d<=days;d++)schedData[m][name].push((isSat(year,+m,d)||isSun(year,+m,d))?'shukyu':'nikkn');}});
+  inp.value='';saveAll();rebuildStaffSelect();renderStaffMgr();
+}
+function removeStaff(i){const name=STAFF[i];if(!confirm(`「${name}」を削除しますか？`))return;STAFF.splice(i,1);delete staffData[name];delete nenkyuData[name];Object.keys(schedData).forEach(m=>delete schedData[m][name]);saveAll();rebuildStaffSelect();renderStaffMgr();}
+
+/* ── Shift Customizer ── */
+function renderShiftList(){
+  const list=document.getElementById('shift-list');list.innerHTML='';
+  SHIFTS.forEach((s,i)=>{
+    const row=document.createElement('div');row.className='shift-row';
+    const grpOpts=GROUPS.map(g=>`<option${s.group===g.name?' selected':''}>${g.name}</option>`).join('')+`<option${s.group==='なし'?' selected':''}>なし</option>`;
+    const cntOpts=['0','0.5','1'].map(v=>`<option${String(s.count)===v?' selected':''}>${v}</option>`).join('');
+    row.innerHTML=`<div class="sh-handle">⠿</div><div class="sh-chip" style="background:${s.bg};color:${s.fg}" contenteditable="true" onblur="SHIFTS[${i}].l=this.textContent.trim();saveAll()">${s.l}</div><select class="sh-select" onchange="SHIFTS[${i}].count=parseFloat(this.value);saveAll()">${cntOpts}</select><select class="sh-select" onchange="SHIFTS[${i}].group=this.value;saveAll()">${grpOpts}</select><input type="color" value="${s.bg}" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[${i}].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[${i}].visible=this.value==='表示';saveAll()"><option${s.visible?' selected':''}>表示</option><option${!s.visible?' selected':''}>非表示</option></select><div class="sh-del" onclick="removeShift(${i})">×</div>`;
+    list.appendChild(row);
+  });
+  const grpList=document.getElementById('grp-list');grpList.innerHTML='';
+  GROUPS.forEach((g,i)=>{
+    const row=document.createElement('div');row.className='grp-row';
+    const spOpts=['なし','shukyu','nenkyu'].map(v=>`<option value="${v}"${g.special===v?' selected':''}>${v==='なし'?'特殊なし':v==='shukyu'?'週休（差分表示）':'有給（残日数）'}</option>`).join('');
+    row.innerHTML=`<input class="grp-inp" value="${g.name}" onchange="GROUPS[${i}].name=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="GROUPS[${i}].special=this.value==='なし'?null:this.value;saveAll()">${spOpts}</select><div class="sh-del" onclick="removeGroup(${i})">×</div>`;
+    grpList.appendChild(row);
+  });
+}
+function addShift(){SHIFTS.splice(SHIFTS.length-1,0,{k:'sh_'+Date.now(),l:'新規',bg:'#f1f0ea',fg:'#57534e',count:1,group:'なし',visible:true});saveAll();renderShiftList();}
+function removeShift(i){if(!confirm('削除しますか？'))return;SHIFTS.splice(i,1);saveAll();renderShiftList();}
+function addGroup(){GROUPS.push({name:'新グループ',special:null});saveAll();renderShiftList();}
+function removeGroup(i){if(!confirm('削除しますか？'))return;GROUPS.splice(i,1);saveAll();renderShiftList();}
+
+/* ── Monthly Shukyu Kijun ── */
+function renderShukyuKijun(){
+  const grid=document.getElementById('msk-grid');grid.innerHTML='';
+  for(let m=1;m<=12;m++){
+    const item=document.createElement('div');item.className='msk-item';
+    item.innerHTML=`<div class="msk-label">${MN[m-1]}</div><input type="number" class="msk-inp" min="0" max="31" value="${shukyuKijun[m]||8}" onchange="shukyuKijun[${m}]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div>`;
+    grid.appendChild(item);
+  }
+}
+
+/* ── Tocho Cal ── */
+function renderTochoCal(){
+  document.getElementById('tc-month-label').textContent=`${year}年${month}月`;
+  if(!tochoDays[month])tochoDays[month]=new Set();
+  const grid=document.getElementById('tc-cal');grid.innerHTML='';
+  const fd=firstDow(year,month),days=daysInMonth(year,month);
+  const hols=getHolidays(year,month);
+  for(let i=0;i<fd;i++){const e=document.createElement('div');e.className='tc-cell empty';grid.appendChild(e);}
+  for(let d=1;d<=days;d++){
+    const cell=document.createElement('div');
+    const isHolOrSun=hols.has(d)||isSun(year,month,d);
+    cell.className='tc-cell'+(isSat(year,month,d)?' sat':hols.has(d)?' hol':isSun(year,month,d)?' sun':'')+(tochoDays[month].has(d)?' tocho':'');
+    cell.textContent=d;
+    cell.onclick=()=>{if(tochoDays[month].has(d))tochoDays[month].delete(d);else tochoDays[month].add(d);saveAll();renderTochoCal();if(document.getElementById('scr-admin').classList.contains('on'))renderAdmin();};
+    grid.appendChild(cell);
+  }
+  const arr=[...tochoDays[month]].sort((a,b)=>a-b);
+  document.getElementById('tc-days-label').textContent=arr.length?arr.map(d=>d+'日').join('・'):'なし';
+}
+
+/* ── Nenkyu Panel ── */
+function renderNenkyuPanel(){
+  const fy=getNenkyuFiscalYear();document.getElementById('nk-year-label').textContent=fy;
+  const list=document.getElementById('nk-list');list.innerHTML='';
+  // ヘッダー行（1行のみ）
+  const hdr=document.createElement('div');hdr.className='nk-row';
+  hdr.style.cssText='font-size:10px;font-weight:500;color:var(--text3);background:none;padding:2px 10px;min-height:auto';
+  hdr.innerHTML='<div>氏名</div><div>本年度付与</div><div>前年度繰越</div><div>消化合計／残</div>';
+  list.appendChild(hdr);
+  STAFF.forEach(name=>{
+    const nd=nenkyuData[name]||{grant:0,carry:0};const nk=calcNenkyu(name);
+    const row=document.createElement('div');row.className='nk-row';
+    const cls=nk.remain<0?'c-over':nk.remain<=5?'c-warn':'c-ok';
+    row.innerHTML=`<div class="nk-name">${name.split(' ')[0]}</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="${nd.grant||0}" onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0};nenkyuData['${name}'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="${nd.carry||0}" onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0};nenkyuData['${name}'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status ${cls}">消化${nk.consumed}日 ／ 残${nk.remain}日</div>`;
+    list.appendChild(row);
+  });
+}
+function updateNenkyu(){
+  if(!confirm('有給を更新します。現在の残日数が前年度繰越にセットされます。'))return;
+  STAFF.forEach(name=>{const nk=calcNenkyu(name);if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0};nenkyuData[name].carry=Math.max(0,nk.remain);nenkyuData[name].grant=0;});
+  saveAll();renderNenkyuPanel();alert('繰越を更新しました。本年度付与日数を入力してください。');
+}
+
+/* ══ SEED ══ */
+function seedDemo(){
+  function sw(n,m,d){ensureDay(n,m,d);staffData[n][m][d].wish=true;ensureSchedule(m);schedData[m][n][d-1]='shukyu';}
+  function sl(n,m,d,ng,c){ensureDay(n,m,d);staffData[n][m][d].limit=true;staffData[n][m][d].ng=new Set(ng);staffData[n][m][d].comment=c;}
+  function sk(n,m,d,k){ensureDay(n,m,d);staffData[n][m][d].kibou=k;}
+  sw('横田 崇',5,9);sw('横田 崇',5,16);
+  sw('工藤 哲史',5,5);
+  sl('工藤 哲史',5,8,['tocho','taiki','hayade'],'通院のため午前勤務のみ可');
+  sl('工藤 哲史',5,15,['tocho','taiki'],'保育園行事のため早退予定');
+  sw('髙松 勇佑',5,8);sw('髙松 勇佑',5,22);
+  sl('岩城 くるみ',5,9,['tocho','hayade'],'');
+  sk('平 修一',5,12,'hayade');sk('長瀨 一希',5,19,'taiki');
+  const set=(n,d,k)=>{if(schedData[5]&&schedData[5][n]&&d<=schedData[5][n].length)schedData[5][n][d-1]=k;};
+  set('畠山 智史',7,'tocho');set('畠山 智史',8,'ake');
+  set('横田 崇',1,'tocho');set('横田 崇',2,'ake');
+  set('髙松 勇佑',13,'tocho');set('髙松 勇佑',14,'ake');
+  set('工藤 哲史',8,'nikkn');
+  set('長瀨 一希',20,'tocho');set('長瀨 一希',21,'ake');
+  set('陳祐 綾花',26,'tocho');set('陳祐 綾花',27,'ake');
+  set('岩城 くるみ',2,'ampms');set('平 修一',9,'hayade');
+  set('畠山 智史',9,'taiki');set('横田 崇',3,'taiki');
+  tochoDays[5]=new Set([1,8,15,22,29]);
+  STAFF.forEach((n,i)=>{nenkyuData[n]={grant:20-i,carry:Math.max(0,8-i*2)};});
+}
+
+/* ══ INIT ══ */
+function initAll(){
+  document.getElementById('month-label').textContent=`${year}年 ${month}月`;
+  document.getElementById('logo-text').innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
+  STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0};});
+  if(!tochoDays[month])tochoDays[month]=new Set();
+  ensureSchedule(month);
+  if(icsSelShifts.size===0)['tocho','ake','taiki','hayade'].forEach(k=>icsSelShifts.add(k));
+  if(icsSelMonths.size===0)icsSelMonths.add(month);
+  rebuildStaffSelect();renderStaffCal();renderSummary();renderYkCard();renderICS();
+  document.getElementById('cfg-title').value=cfg.title;
+  document.getElementById('cfg-auto-ake').checked=cfg.autoAke!==false;
+  document.getElementById('cfg-wish-limit').value=cfg.wishLimit||6;
+  document.getElementById('cfg-wish-day-limit').value=cfg.wishDayLimit||2;
+}
+
+// Firebase同期が来るまでデモデータで初期表示
+// （ログイン後に_fbStartSync→onValueでFirebaseデータに上書きされる）
+const loaded=loadAll(); // 常にfalseを返す
+if(!loaded){STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0};});ensureSchedule(month);seedDemo();}
+initAll();
+
+/* ══ レイアウト切り替え ══
+   PC横長  : 2カラムgrid  左[カレンダー→有給→ICS]  右[詳細→登録済み]
+   縦長/SP : 1カラム      [カレンダー→詳細→登録済み→有給→ICS]
+*/
+let _narrowMode=null; // 前回モードキャッシュ
+
+function applyLayoutMode(){
+  const wrap   =document.getElementById('stf-layout-wrap');
+  const colL   =document.getElementById('stf-col-left');
+  const colR   =document.getElementById('stf-col-right');
+  const cal    =document.getElementById('card-cal');
+  const detail =document.getElementById('detail-card');
+  const summary=document.getElementById('card-summary');
+  const nenkyu =document.getElementById('card-nenkyu');
+  const ics    =document.getElementById('card-ics');
+  if(!wrap||!colL||!colR||!cal||!detail||!summary||!nenkyu||!ics)return;
+
+  const narrow = window.innerWidth<=700 || window.innerWidth<=window.innerHeight;
+  if(narrow===_narrowMode)return; // 変化なければ何もしない
+  _narrowMode=narrow;
+
+  if(narrow){
+    /* ── 縦長/SP: 1カラム ──
+       カレンダー → 詳細 → 登録済み → 有給 → ICS
+       wrap を block、colRを非表示にしてcolLに全カードを順番に入れる */
+    wrap.style.cssText='display:block';
+    colR.style.display='none';
+    // colL に順序通り appendChild（既に子なら移動）
+    colL.style.cssText='display:flex;flex-direction:column;gap:12px;width:100%';
+    colL.appendChild(cal);
+    colL.appendChild(detail);
+    colL.appendChild(summary);
+    colL.appendChild(nenkyu);
+    colL.appendChild(ics);
+  } else {
+    /* ── PC横長: 2カラムgrid ──
+       左[カレンダー→有給→ICS]  右[詳細→登録済み] */
+    wrap.style.cssText='display:grid;grid-template-columns:1fr 310px;gap:14px;align-items:start';
+    colR.style.display='';
+    colL.style.cssText='display:flex;flex-direction:column;gap:12px';
+    colR.style.cssText='display:flex;flex-direction:column;gap:12px';
+    colL.appendChild(cal);
+    colL.appendChild(nenkyu);
+    colL.appendChild(ics);
+    colR.appendChild(detail);
+    colR.appendChild(summary);
+  }
+}
+window.addEventListener('resize',applyLayoutMode);
+window.addEventListener('orientationchange',()=>setTimeout(applyLayoutMode,150));
+applyLayoutMode();
+</script>
+</body>
+</html>
