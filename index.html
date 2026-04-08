@@ -7,7 +7,7 @@
 <!-- Firebase SDK -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
   import { getDatabase, ref, set, get, onValue }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
@@ -29,8 +29,14 @@
 
   // ── Googleログイン ──
   window._fbSignIn = async () => {
-    try { await signInWithPopup(auth, provider); }
-    catch(e) { alert('ログインに失敗しました: ' + e.message); }
+    try {
+      const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if(isIOS){
+        await signInWithRedirect(auth, provider);
+      } else {
+        await signInWithPopup(auth, provider);
+      }
+    } catch(e) { alert('ログインに失敗しました: ' + e.message); }
   };
   window._fbSignOut = async () => {
     if(confirm('ログアウトしますか？')) await signOut(auth);
@@ -98,6 +104,11 @@
       } catch(e) { console.error('データ反映エラー:', e); }
     });
   };
+
+  // ── リダイレクト結果の受け取り（iOS Safari対応）──
+  getRedirectResult(auth).catch(e => {
+    if(e.code !== 'auth/no-current-user') console.error('リダイレクトログインエラー:', e);
+  });
 
   // ── 認証状態の監視 ──
   onAuthStateChanged(auth, (user) => {
