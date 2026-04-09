@@ -462,7 +462,7 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
             <div class="yk-val" id="yk-consumed" style="color:#27500A">—</div>
             <div class="yk-sub" id="yk-consumed-sub"></div>
           </div>
-          <div class="yk-item yk-total"><div class="yk-label">使用可能合計</div><div class="yk-val" id="yk-total">—</div><div class="yk-sub" id="yk-total-sub"></div></div>
+          <div class="yk-item yk-total"><div class="yk-label">残り日数</div><div class="yk-val" id="yk-total">—</div><div class="yk-sub" id="yk-total-sub"></div></div>
         </div>
         <div class="bar-wrap">
           <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text2);margin-bottom:4px">
@@ -601,14 +601,12 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
       </div>
       <div class="set-panel" id="sp-data">
         <div class="sec-label">データ保存・読み込み</div>
-        <div class="set-row"><div style="flex:1"><div class="set-label">自動保存</div><div class="set-desc">ブラウザのローカルストレージに自動保存</div></div><span style="font-size:11px;color:var(--text3)">常時ON</span></div>
+        <div class="set-row"><div style="flex:1"><div class="set-label">自動保存</div><div class="set-desc">Firebaseにリアルタイム保存（常時ON）</div></div><span style="font-size:11px;color:var(--text3)">常時ON</span></div>
         <div class="data-actions">
-          <button class="btn primary" onclick="exportData()">↓ JSONで書き出し</button>
-          <button class="btn" onclick="document.getElementById('import-file').click()">↑ JSONを読み込み</button>
-          <input type="file" id="import-file" accept=".json" style="display:none" onchange="importData(event)">
+          <button class="btn primary" onclick="exportHtml()">↓ HTMLで書き出し</button>
           <button class="btn danger" onclick="clearData()">データをリセット</button>
         </div>
-        <div class="note-box">書き出したJSONで別PCやブラウザに移行できます。</div>
+        <div class="note-box">現在の入力内容が埋め込まれたHTMLファイルを保存します。テキストエディタで開いて編集することもできます。</div>
       </div>
     </div>
   </div>
@@ -741,6 +739,41 @@ function loadAll(){
 function exportData(){
   const blob=new Blob([JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),schedData,nenkyuData,year,month},null,2)],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.json`;a.click();
+}
+function exportHtml(){
+  // 現在のHTMLを取得し、初期データ部分を現在の状態で上書きして保存
+  const snapshot=JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
+    tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),
+    schedData,nenkyuData,year,month});
+  // 現在のHTMLソースにスナップショットを埋め込む
+  let html=document.documentElement.outerHTML;
+  // </body>直前にデータ復元スクリプトを注入（既存があれば置換）
+  const marker='<!-- KINMUHYO_SNAPSHOT -->';
+  const inject=`${marker}<script>
+(function(){
+  const _snap=${snapshot};
+  if(_snap.cfg)cfg=_snap.cfg;
+  if(_snap.STAFF)STAFF=_snap.STAFF;
+  if(_snap.SHIFTS)SHIFTS=_snap.SHIFTS;
+  if(_snap.GROUPS)GROUPS=_snap.GROUPS;
+  if(_snap.shukyuKijun)shukyuKijun=_snap.shukyuKijun;
+  if(_snap.tochoDays){tochoDays={};Object.entries(_snap.tochoDays).forEach(([m,a])=>{tochoDays[m]=new Set(a);});}
+  if(_snap.nenkyuData)nenkyuData=_snap.nenkyuData;
+  if(_snap.schedData)schedData=_snap.schedData;
+  if(_snap.year)year=_snap.year;
+  if(_snap.month)month=_snap.month;
+  if(_snap.staffData){staffData={};Object.entries(_snap.staffData).forEach(([n,mv])=>{staffData[n]={};Object.entries(mv).forEach(([mo,dv])=>{staffData[n][mo]={};Object.entries(dv).forEach(([d,v])=>{staffData[n][mo][d]={...v,ng:new Set(v.ng||[])};});});});}
+  if(typeof initAll==='function')initAll();
+})();
+<\/script>`;
+  // 既存のスナップショットを除去して新しいものを挿入
+  if(html.includes(marker)){
+    html=html.replace(/<!-- KINMUHYO_SNAPSHOT -->[\s\S]*?<\/script>/,'');
+  }
+  html=html.replace('</body>',inject+'</body>');
+  const blob=new Blob(['<!DOCTYPE html>'+html],{type:'text/html;charset=utf-8'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.html`;a.click();
 }
 function importData(e){
   const file=e.target.files[0];if(!file)return;
@@ -1045,8 +1078,8 @@ function renderYkCard(){
   document.getElementById('yk-grant-sub').textContent=`残${nk.grantRem}日（消化${nk.grantUsed}日）`;
   document.getElementById('yk-consumed').textContent=nk.consumed+'日';
   document.getElementById('yk-consumed-sub').textContent=`繰越${nk.carryUsed}日 + 本年度${nk.grantUsed}日`;
-  document.getElementById('yk-total').textContent=nk.total+'日';
-  document.getElementById('yk-total-sub').textContent=`繰越${nk.carryRem}日 + 本年度${nk.grantRem}日`;
+  document.getElementById('yk-total').textContent=nk.remain+'日';
+  document.getElementById('yk-total-sub').textContent=`繰越消化残${nk.carryRem}日 + 本年度消化残${nk.grantRem}日`;
   const remTxt=nk.remain>=0?`残${nk.remain}日`:`超過${Math.abs(nk.remain)}日`;
   const remEl=document.getElementById('yk-remain');
   remEl.textContent=remTxt;remEl.style.color=nk.remain<0?'#991b1b':nk.remain<=5?'#92400e':'#27500A';
@@ -1282,16 +1315,19 @@ function exportExcel(){
   let ci=2+days;
   GROUPS.forEach(g=>{ws.getColumn(ci++).width=8;if(g.special==='nenkyu')ws.getColumn(ci++).width=7;});
 
-  // ── 行1: タイトル（結合はstyle設定後に行う）──
+  // ── 行1: タイトル（背景なし・文字黒）──
   const titleRow=ws.getRow(1);
   titleRow.height=22;
   const titleCell=titleRow.getCell(1);
   titleCell.value=`${cfg.title} 勤務表 ${year}年${month}月`;
-  // 先にstyleをセット、結合後に再セット
-  const titleStyle=makeStyle('#1a1917','#ffffff',true,'center');
+  const titleStyle={
+    fill:{type:'pattern',pattern:'none'},
+    font:{color:{argb:'FF1a1917'},bold:true,name:'Noto Sans JP',size:11},
+    alignment:{horizontal:'center',vertical:'middle'},
+    border:{top:{style:'thin',color:{argb:'FFE2E0D8'}},bottom:{style:'thin',color:{argb:'FFE2E0D8'}},left:{style:'thin',color:{argb:'FFE2E0D8'}},right:{style:'thin',color:{argb:'FFE2E0D8'}}}
+  };
   titleCell.style=titleStyle;
   ws.mergeCells(1,1,1,totalCols);
-  // ExcelJSは結合後にマスターセルへ再度styleをセット
   ws.getCell(1,1).style=titleStyle;
 
   // ── 行2: ヘッダー ──
