@@ -45,24 +45,44 @@
   };
 
   // ── Firebase 保存 ──
-  // 自分の書き込みによるonValueコールバックを無視するためのフラグ
-  let _isSaving = false;
-  let _saveTimer = null;
+  //
+  // 【設計方針】キャッシュ由来の上書き防止
+  //   _myWriteTs  : 自分が最後にFirebaseへ書き込んだタイムスタンプ(ms)
+  //   _saveTimer  : デバウンスタイマー
+  //   _pendingPayload : タイマー発火時に使う「最新」ペイロード（問題B対策）
+  //
+  // onValueが発火したとき、サーバー側のタイムスタンプが自分の書き込みより
+  // 古い（＝自分の書き込みがまだサーバーに反映されていない間に来た通知）
+  // と判定できる場合は無視する。
+  //
+  // Firebaseはクライアント書き込み直後にローカルキャッシュでonValueを
+  // 即時発火させる（問題C）。これをブロックするため、set()呼び出しの
+  // 直前（Promiseより前）に _myWriteTs を更新し、onValue側で比較する。
 
-  window._fbSave = async (payload) => {
+  let _myWriteTs = 0;      // 自分の最終書き込み時刻
+  let _saveTimer = null;
+  let _pendingPayload = null;  // デバウンス中の最新ペイロード
+
+  window._fbSave = (payload) => {
     const uid = auth.currentUser?.uid;
     if(!uid) return;
-    // 連続保存をデバウンス（500ms以内の重複書き込みをまとめる）
+    // 最新ペイロードを常に上書き（問題B対策：古いpayloadがsetされるのを防ぐ）
+    _pendingPayload = payload;
     if(_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(async () => {
+      _saveTimer = null;  // タイマー完了をクリア（onValueガード用）
+      const uid2 = auth.currentUser?.uid;
+      if(!uid2) return;
+      const toSend = _pendingPayload;
+      _pendingPayload = null;
+      // set()呼び出し直前にタイムスタンプを記録（問題A・C対策）
+      // これによりonValueが「自分の書き込みによるもの」と判定できる
+      _myWriteTs = Date.now();
       try {
-        _isSaving = true;
-        await set(ref(db, 'kinmuhyo/shared'), payload);
-        // Firebaseのローカルキャッシュが即時にonValueを発火させるため
-        // 少し待ってからフラグを解除する
-        setTimeout(() => { _isSaving = false; }, 800);
+        await set(ref(db, 'kinmuhyo/shared'), toSend);
       } catch(e) {
-        _isSaving = false;
+        // 失敗時はタイムスタンプをリセット（次のonValueを受け入れる）
+        _myWriteTs = 0;
         console.error('Firebase保存エラー:', e);
       }
     }, 300);
@@ -74,11 +94,21 @@
     if(_fbListenerAttached) return;
     _fbListenerAttached = true;
     onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
-      // 自分の保存によるコールバックは無視（混線・競合防止）
-      if(_isSaving) return;
+      // ── 自分の書き込みによる即時コールバックを無視（問題A・C対策） ──
+      // 自分が書き込んでから1200ms以内に来たonValueは自分起因とみなしてスキップ。
+      // 1200ms: デバウンス300ms + ネットワーク往復 + バッファ
+      if(Date.now() - _myWriteTs < 1200) return;
+
+      // デバウンス待機中（自分がまもなく書き込む予定）の場合もスキップ
+      // 他端末のデータで自分の未送信変更を上書きするのを防ぐ（問題A対策）
+      if(_saveTimer !== null) return;
 
       const data = snapshot.val();
       if(!data) return;
+
+      // picker操作中・設定入力中は上書きを保留（問題D対策）
+      const pickerOpen = document.getElementById('pk-overlay')?.style.display === 'flex';
+      if(pickerOpen) return;
 
       // アプリ側のグローバル変数に反映
       try {
@@ -115,20 +145,14 @@
           STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0};});
           if(!tochoDays[month])tochoDays[month]=new Set();
           ensureSchedule(month);
-
-          // 管理者画面でpickerが開いている間はUI更新をスキップ（操作中断防止）
-          const pickerOpen = document.getElementById('pk-overlay')?.style.display === 'flex';
-
           rebuildStaffSelect();
           renderStaffCal();renderSummary();renderYkCard();renderICS();
           const ct=document.getElementById('cfg-title');if(ct)ct.value=cfg.title;
           const ca=document.getElementById('cfg-auto-ake');if(ca)ca.checked=cfg.autoAke!==false;
           const cw=document.getElementById('cfg-wish-limit');if(cw)cw.value=cfg.wishLimit||6;
           const cd=document.getElementById('cfg-wish-day-limit');if(cd)cd.value=cfg.wishDayLimit||2;
-
-          // 管理者画面が開いていてpickerが閉じているときのみ再描画
           const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
-          if(adminActive && !pickerOpen){
+          if(adminActive){
             ensureSchedule(month);
             renderAdmin();
           }
@@ -141,12 +165,11 @@
   window._fbSaveImmediate = async (payload) => {
     const uid = auth.currentUser?.uid;
     if(!uid) return;
+    _myWriteTs = Date.now();
     try {
-      _isSaving = true;
       await set(ref(db, 'kinmuhyo/shared'), payload);
-      setTimeout(() => { _isSaving = false; }, 800);
     } catch(e) {
-      _isSaving = false;
+      _myWriteTs = 0;
       console.error('Firebase即時保存エラー:', e);
     }
   };
