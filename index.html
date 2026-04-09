@@ -1,9 +1,11 @@
-<!DOCTYPE html><html lang="ja"><head>
+<!DOCTYPE html>
+<html lang="ja">
+<head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>勤務表</title>
 <!-- Firebase SDK -->
-<script src="https://apis.google.com/_/scs/abc-static/_/js/k=gapi.lb.ja.A4Ze2Y8m5G4.O/m=gapi_iframes/rt=j/sv=1/d=1/ed=1/rs=AHpOoo8ZjPyJRIxPCplLO3OtmhPIFiNdGA/cb=gapi.loaded_0?le=scs" async=""></script><script type="module">
+<script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
@@ -43,19 +45,27 @@
   };
 
   // ── Firebase 保存 ──
-  // 自分の書き込みエコーバックでonValueが再発火するのを防ぐフラグ
+  // 自分の書き込みによるonValueコールバックを無視するためのフラグ
   let _isSaving = false;
+  let _saveTimer = null;
+
   window._fbSave = async (payload) => {
     const uid = auth.currentUser?.uid;
     if(!uid) return;
-    try {
-      _isSaving = true;
-      await set(ref(db, 'kinmuhyo/shared'), payload);
-    } catch(e) { console.error('Firebase保存エラー:', e); }
-    finally {
-      // 書き込み後1500ms はエコーバックを無視（ネットワーク遅延を考慮）
-      setTimeout(() => { _isSaving = false; }, 1500);
-    }
+    // 連続保存をデバウンス（500ms以内の重複書き込みをまとめる）
+    if(_saveTimer) clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(async () => {
+      try {
+        _isSaving = true;
+        await set(ref(db, 'kinmuhyo/shared'), payload);
+        // Firebaseのローカルキャッシュが即時にonValueを発火させるため
+        // 少し待ってからフラグを解除する
+        setTimeout(() => { _isSaving = false; }, 800);
+      } catch(e) {
+        _isSaving = false;
+        console.error('Firebase保存エラー:', e);
+      }
+    }, 300);
   };
 
   // ── Firebase 読み込み（リアルタイム同期） ──
@@ -64,51 +74,35 @@
     if(_fbListenerAttached) return;
     _fbListenerAttached = true;
     onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
-      // 自分がsaveAll()した直後のエコーバックは無視（混線防止）
+      // 自分の保存によるコールバックは無視（混線・競合防止）
       if(_isSaving) return;
+
       const data = snapshot.val();
       if(!data) return;
+
       // アプリ側のグローバル変数に反映
       try {
         if(data.cfg) cfg = data.cfg;
         if(data.STAFF) STAFF = data.STAFF;
         if(data.SHIFTS) SHIFTS = data.SHIFTS;
         if(data.GROUPS) GROUPS = data.GROUPS;
-        if(data.shukyuKijun){
-          // Firebase は数値キーを配列に変換することがあるため正規化する
-          if(Array.isArray(data.shukyuKijun)){
-            const arr=data.shukyuKijun;
-            shukyuKijun={};
-            for(let i=1;i<=12;i++) shukyuKijun[i]=arr[i]??arr[i-1]??8;
-          } else {
-            shukyuKijun=data.shukyuKijun;
-          }
-        }
+        if(data.shukyuKijun) shukyuKijun = data.shukyuKijun;
         if(data.tochoDays){
           tochoDays = {};
-          // Firebaseキーは文字列で返るため数値キーに正規化する
-          Object.entries(data.tochoDays).forEach(([m,a]) => {
-            tochoDays[Number(m)] = new Set(Array.isArray(a) ? a : []);
-          });
+          Object.entries(data.tochoDays).forEach(([m,a]) => { tochoDays[m] = new Set(a); });
         }
         if(data.nenkyuData) nenkyuData = data.nenkyuData;
-        if(data.schedData){
-          // Firebaseは数値キーを文字列で返すため数値キーに正規化する
-          schedData = {};
-          Object.entries(data.schedData).forEach(([m,v]) => {
-            if(v != null) schedData[Number(m)] = v;
-          });
-        }
-        if(data.year != null) year = Number(data.year);
-        if(data.month != null) month = Number(data.month);
+        if(data.schedData) schedData = data.schedData;
+        if(data.year) year = data.year;
+        if(data.month) month = data.month;
         if(data.staffData){
           staffData = {};
           Object.entries(data.staffData).forEach(([n,mv]) => {
             staffData[n] = {};
             Object.entries(mv).forEach(([mo,dv]) => {
-              staffData[n][Number(mo)] = {};
+              staffData[n][mo] = {};
               Object.entries(dv).forEach(([d,v]) => {
-                staffData[n][Number(mo)][Number(d)] = {...v, ng: new Set(Array.isArray(v.ng)?v.ng:[])};
+                staffData[n][mo][d] = {...v, ng: new Set(v.ng||[])};
               });
             });
           });
@@ -121,26 +115,40 @@
           STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0};});
           if(!tochoDays[month])tochoDays[month]=new Set();
           ensureSchedule(month);
+
+          // 管理者画面でpickerが開いている間はUI更新をスキップ（操作中断防止）
+          const pickerOpen = document.getElementById('pk-overlay')?.style.display === 'flex';
+
           rebuildStaffSelect();
-          // currentStaff が有効なら選択を維持、無効なら先頭スタッフにリセット
-          if(currentStaff && STAFF.includes(currentStaff)){
-            const sel=document.getElementById('stf-sel');
-            if(sel) sel.value=currentStaff;
-          } else if(STAFF.length>0){
-            currentStaff=STAFF[0];
-            const sel=document.getElementById('stf-sel');
-            if(sel) sel.value=currentStaff;
-          }
           renderStaffCal();renderSummary();renderYkCard();renderICS();
-          // 管理者画面も同期
-          if(typeof renderAdminTbl==='function') renderAdminTbl();
           const ct=document.getElementById('cfg-title');if(ct)ct.value=cfg.title;
           const ca=document.getElementById('cfg-auto-ake');if(ca)ca.checked=cfg.autoAke!==false;
           const cw=document.getElementById('cfg-wish-limit');if(cw)cw.value=cfg.wishLimit||6;
           const cd=document.getElementById('cfg-wish-day-limit');if(cd)cd.value=cfg.wishDayLimit||2;
+
+          // 管理者画面が開いていてpickerが閉じているときのみ再描画
+          const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
+          if(adminActive && !pickerOpen){
+            ensureSchedule(month);
+            renderAdmin();
+          }
         }
       } catch(e) { console.error('データ反映エラー:', e); }
     });
+  };
+
+  // 即時保存（beforeunload時用・デバウンスなし）
+  window._fbSaveImmediate = async (payload) => {
+    const uid = auth.currentUser?.uid;
+    if(!uid) return;
+    try {
+      _isSaving = true;
+      await set(ref(db, 'kinmuhyo/shared'), payload);
+      setTimeout(() => { _isSaving = false; }, 800);
+    } catch(e) {
+      _isSaving = false;
+      console.error('Firebase即時保存エラー:', e);
+    }
   };
 
   // ── 認証状態の監視 ──
@@ -422,11 +430,11 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
 /* ── Print removed - Excel export only ── */
 </style>
 <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
-<script src="https://apis.google.com/js/api.js?onload=__iframefcb846208" type="text/javascript" charset="UTF-8" gapi_processed="true"></script></head>
+</head>
 <body>
 
 <!-- ログインオーバーレイ -->
-<div id="login-overlay" style="position: fixed; inset: 0px; background: rgba(245, 244, 240, 0.97); z-index: 9999; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 20px;">
+<div id="login-overlay" style="position:fixed;inset:0;background:rgba(245,244,240,0.97);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px">
   <div style="font-size:22px;font-weight:700;letter-spacing:-.3px">勤務表</div>
   <div style="font-size:13px;color:#6b6860;margin-bottom:8px">職場メンバーのGoogleアカウントでログインしてください</div>
   <button onclick="_fbSignIn()" style="display:flex;align-items:center;gap:10px;padding:12px 24px;border-radius:8px;border:1px solid #e2e0d8;background:#fff;font-size:14px;font-weight:500;cursor:pointer;font-family:inherit;box-shadow:0 1px 4px rgba(0,0,0,.08)">
@@ -455,20 +463,17 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
     <button class="mbtn" onclick="changeMonth(1)">›</button>
   </div>
   <div class="tabs">
-    <button class="tab" onclick="showScreen('staff')">希望入力</button>
+    <button class="tab on" onclick="showScreen('staff')">希望入力</button>
     <button class="tab" onclick="showScreen('admin')">管理者</button>
-    <button class="tab on" onclick="showScreen('settings')">設定</button>
+    <button class="tab" onclick="showScreen('settings')">設定</button>
   </div>
-  <div id="user-info" style="display:flex;align-items:center;margin-left:8px">
-          <img src="https://lh3.googleusercontent.com/a/ACg8ocKcH0t_aJ1boqz0nmRYqNTj0B2K4wKJAC5Sd_KYaIpRxgxS-g=s96-c" style="width:28px;height:28px;border-radius:50%;vertical-align:middle;margin-right:6px">
-          <span style="font-size:12px;color:var(--text2)">畠山智史</span>
-          <button class="btn" style="margin-left:8px;padding:4px 10px;min-height:0;font-size:11px" onclick="_fbSignOut()">ログアウト</button></div>
+  <div id="user-info" style="display:flex;align-items:center;margin-left:8px"></div>
 </header>
 
 <!-- 希望入力 -->
-<div class="scr" id="scr-staff">
+<div class="scr on" id="scr-staff">
   <div class="stf-hdr">
-    <select class="stf-select" id="stf-sel" onchange="onStaffChange()"><option value="畠山 智史">畠山 智史</option><option value="横田 崇">横田 崇</option><option value="髙松 勇佑">髙松 勇佑</option><option value="工藤 哲史">工藤 哲史</option><option value="平 修一">平 修一</option><option value="長瀨 一希">長瀨 一希</option><option value="岩城 くるみ">岩城 くるみ</option><option value="陳祐 綾花">陳祐 綾花</option></select>
+    <select class="stf-select" id="stf-sel" onchange="onStaffChange()"></select>
     <div class="mode-pills">
       <button class="mpill wish on" id="pill-wish" onclick="setMode('wish')">● 希望休</button>
       <button class="mpill limit" id="pill-limit" onclick="setMode('limit')">▲ 勤務条件</button>
@@ -477,43 +482,35 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
     <span style="font-size:11px;color:var(--text3)" id="mode-hint">タップで希望休を登録</span>
   </div>
   <!-- PC: 2カラム grid。縦長/モバイル: JSがDOM順序を並び替えて1列表示 -->
-  <div id="stf-layout-wrap" style="display: grid; grid-template-columns: 1fr 310px; gap: 14px; align-items: start;">
+  <div id="stf-layout-wrap" style="display:grid;grid-template-columns:1fr 310px;gap:14px;align-items:start">
 
     <!-- 左カラムコンテナ -->
-    <div id="stf-col-left" style="display: flex; flex-direction: column; gap: 12px;">
+    <div id="stf-col-left" style="display:flex;flex-direction:column;gap:12px">
       <!-- ① カレンダーカード -->
-      
-      <!-- ③ 有給カード（縦長時は②の後に来る） -->
-      
-      <!-- ICSカード -->
-      
-    <div class="card" id="card-cal">
-        <div class="cal-legend" id="stf-cal-legend">
-    <span class="leg" style="background:var(--s-wish);color:var(--f-wish)">● 希望休</span>
-    <span class="leg" style="background:var(--s-limit);color:var(--f-limit)">▲ 勤務条件</span>
-    <span class="leg" style="background:var(--s-kibou);color:var(--f-kibou)">★ 希望勤務</span>
-    <span class="leg" style="background:#dbeafe;color:#1e40af">土</span>
-    <span class="leg" style="background:#fee2e2;color:#991b1b">日・祝</span></div>
+      <div class="card" id="card-cal">
+        <div class="cal-legend" id="stf-cal-legend"></div>
         <div class="cal-dow">
           <div style="color:#991b1b">日</div><div>月</div><div>火</div><div>水</div><div>木</div><div>金</div>
           <div style="color:#1e40af">土</div>
         </div>
-        <div class="cal-grid" id="stf-cal"><div class="cal-cell empty"></div><div class="cal-cell empty"></div><div class="cal-cell empty"></div><div class="cal-cell empty"></div><div class="cal-cell empty"></div><div class="cal-cell normal tocho-day">1</div><div class="cal-cell sat">2</div><div class="cal-cell hol">3</div><div class="cal-cell hol">4</div><div class="cal-cell hol">5</div><div class="cal-cell hol">6</div><div class="cal-cell normal">7</div><div class="cal-cell normal">8</div><div class="cal-cell sat">9</div><div class="cal-cell sun">10</div><div class="cal-cell normal tocho-day">11</div><div class="cal-cell normal">12</div><div class="cal-cell normal">13</div><div class="cal-cell normal">14</div><div class="cal-cell normal">15</div><div class="cal-cell sat">16</div><div class="cal-cell sun tocho-day">17</div><div class="cal-cell normal">18</div><div class="cal-cell normal">19</div><div class="cal-cell normal">20</div><div class="cal-cell normal">21</div><div class="cal-cell normal tocho-day">22</div><div class="cal-cell sat">23</div><div class="cal-cell sun">24</div><div class="cal-cell normal">25</div><div class="cal-cell normal">26</div><div class="cal-cell normal">27</div><div class="cal-cell normal tocho-day">28</div><div class="cal-cell normal">29</div><div class="cal-cell sat">30</div><div class="cal-cell sun">31</div></div>
-      </div><div class="yk-card" id="card-nenkyu">
-        <div class="yk-title">有給状況（<span id="yk-year">2026</span>年度）</div>
+        <div class="cal-grid" id="stf-cal"></div>
+      </div>
+      <!-- ③ 有給カード（縦長時は②の後に来る） -->
+      <div class="yk-card" id="card-nenkyu">
+        <div class="yk-title">有給状況（<span id="yk-year"></span>年度）</div>
         <div class="yk-grid">
-          <div class="yk-item"><div class="yk-label">前年度繰越</div><div class="yk-val" id="yk-carry">0日</div><div class="yk-sub" id="yk-carry-sub">残0日（消化0日）</div></div>
-          <div class="yk-item"><div class="yk-label">本年度付与</div><div class="yk-val" id="yk-grant">0日</div><div class="yk-sub" id="yk-grant-sub">残0日（消化0日）</div></div>
+          <div class="yk-item"><div class="yk-label">前年度繰越</div><div class="yk-val" id="yk-carry">—</div><div class="yk-sub" id="yk-carry-sub"></div></div>
+          <div class="yk-item"><div class="yk-label">本年度付与</div><div class="yk-val" id="yk-grant">—</div><div class="yk-sub" id="yk-grant-sub"></div></div>
           <div class="yk-item" style="background:#EAF3DE;border-radius:var(--rs);padding:8px 10px">
             <div class="yk-label" style="color:#3B6D11">今年度 消化合計</div>
-            <div class="yk-val" id="yk-consumed" style="color:#27500A">0日</div>
-            <div class="yk-sub" id="yk-consumed-sub">繰越0日 + 本年度0日</div>
+            <div class="yk-val" id="yk-consumed" style="color:#27500A">—</div>
+            <div class="yk-sub" id="yk-consumed-sub"></div>
           </div>
-          <div class="yk-item yk-total"><div class="yk-label">残り日数</div><div class="yk-val" id="yk-total">0日</div><div class="yk-sub" id="yk-total-sub">繰越消化残0日 + 本年度消化残0日</div></div>
+          <div class="yk-item yk-total"><div class="yk-label">残り日数</div><div class="yk-val" id="yk-total">—</div><div class="yk-sub" id="yk-total-sub"></div></div>
         </div>
         <div class="bar-wrap">
           <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text2);margin-bottom:4px">
-            <span>消化状況</span><span id="yk-remain" style="font-weight: 500; color: rgb(146, 64, 14);">残0日</span>
+            <span>消化状況</span><span id="yk-remain" style="font-weight:500"></span>
           </div>
           <div class="bar-track">
             <div class="bar-carry" id="bar-carry" style="width:0%"></div>
@@ -525,23 +522,23 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
             <div class="bl-item"><div class="bl-dot" style="background:var(--surface2);border:1px solid var(--border)"></div>残</div>
           </div>
         </div>
-      </div><div class="ics-card" id="card-ics">
+      </div>
+      <!-- ICSカード -->
+      <div class="ics-card" id="card-ics">
         <div class="card-title">カレンダー取り込み（.ics）</div>
         <div style="font-size:11px;color:var(--text2)">取り込む月を選択</div>
-        <div class="ics-months" id="ics-months"><span class="ics-chip">1月</span><span class="ics-chip">2月</span><span class="ics-chip">3月</span><span class="ics-chip">4月</span><span class="ics-chip on">5月</span><span class="ics-chip">6月</span><span class="ics-chip">7月</span><span class="ics-chip">8月</span><span class="ics-chip">9月</span><span class="ics-chip">10月</span><span class="ics-chip">11月</span><span class="ics-chip">12月</span></div>
+        <div class="ics-months" id="ics-months"></div>
         <div style="font-size:11px;color:var(--text2);margin-top:6px">取り込む勤務種別</div>
-        <div class="ics-shifts" id="ics-shifts"><span class="ics-sh-btn off" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</span><span class="ics-sh-btn on" style="background: rgb(209, 250, 229); color: rgb(6, 95, 70);">早出</span><span class="ics-sh-btn on" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">当直</span><span class="ics-sh-btn on" style="background: rgb(254, 243, 199); color: rgb(146, 64, 14);">明け</span><span class="ics-sh-btn on" style="background: rgb(220, 252, 231); color: rgb(22, 101, 52);">待機</span><span class="ics-sh-btn off" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</span><span class="ics-sh-btn off" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">年休</span><span class="ics-sh-btn off" style="background: rgb(237, 233, 254); color: rgb(76, 29, 149);">午前(週休)</span><span class="ics-sh-btn off" style="background: rgb(255, 237, 213); color: rgb(124, 45, 18);">午前(年休)</span></div>
+        <div class="ics-shifts" id="ics-shifts"></div>
         <button class="btn primary" style="margin-top:8px;width:100%" onclick="downloadICS()">↓ .ics をダウンロード</button>
         <div style="font-size:10px;color:var(--text3);margin-top:4px">iPhone / Google カレンダー 両対応</div>
-      </div></div>
+      </div>
+    </div>
 
     <!-- 右カラムコンテナ -->
-    <div id="stf-col-right" style="display: flex; flex-direction: column; gap: 12px;">
+    <div id="stf-col-right" style="display:flex;flex-direction:column;gap:12px">
       <!-- ② 詳細カード -->
-      
-      <!-- ② 登録済みカード -->
-      
-    <div class="card" id="detail-card">
+      <div class="card" id="detail-card">
         <div class="card-title" id="detail-title">日付を選択してください</div>
         <div class="side-empty" id="detail-empty">カレンダーで日付をタップすると<br>設定できます</div>
         <div id="detail-body" style="display:none">
@@ -563,10 +560,13 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
             <button class="save-btn" onclick="saveKibou()">保存</button>
           </div>
         </div>
-      </div><div class="card" id="card-summary">
-        <div class="card-title">登録済み（<span id="sum-month">5月</span>）</div>
+      </div>
+      <!-- ② 登録済みカード -->
+      <div class="card" id="card-summary">
+        <div class="card-title">登録済み（<span id="sum-month"></span>）</div>
         <div class="sum-list" id="sum-list"><div class="side-empty">まだ登録がありません</div></div>
-      </div></div>
+      </div>
+    </div>
 
   </div>
 </div>
@@ -574,76 +574,76 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
 <!-- 管理者 -->
 <div class="scr" id="scr-admin">
   <div class="admin-top">
-    <div id="admin-legend" style="display:flex;gap:4px;flex-wrap:wrap;flex:1"><span class="leg" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</span><span class="leg" style="background: rgb(209, 250, 229); color: rgb(6, 95, 70);">早出</span><span class="leg" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">当直</span><span class="leg" style="background: rgb(254, 243, 199); color: rgb(146, 64, 14);">明け</span><span class="leg" style="background: rgb(220, 252, 231); color: rgb(22, 101, 52);">待機</span><span class="leg" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</span><span class="leg" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">年休</span><span class="leg" style="background: rgb(237, 233, 254); color: rgb(76, 29, 149);">午前(週休)</span><span class="leg" style="background: rgb(255, 237, 213); color: rgb(124, 45, 18);">午前(年休)</span><span class="leg" style="background: rgb(240, 239, 233); color: rgb(160, 158, 151);">―</span><span class="leg" style="background:var(--s-wish);color:var(--f-wish)">●希望休</span><span class="leg" style="background:var(--s-kibou);color:var(--f-kibou)">★希望勤務</span><span class="leg" style="background:var(--s-limit);color:var(--f-limit)">▲条件</span><span class="leg" style="outline:2px solid #dc2626;background:#fee2e2;color:#991b1b">⚠違反</span></div>
+    <div id="admin-legend" style="display:flex;gap:4px;flex-wrap:wrap;flex:1"></div>
     <button class="btn warn" onclick="resetMonth()">当月リセット</button>
     <button class="btn primary" onclick="exportExcel()">Excelで出力</button>
   </div>
-  <div class="alert-bar on" id="alert-bar">当直不足(2名未満): 1日(0名)・11日(0名)・17日(0名)・22日(0名)・28日(0名)<br>待機者なし(平日): 7日・8日・12日・13日・14日・15日・18日・19日・20日・21日・25日・26日・27日・29日</div>
+  <div class="alert-bar" id="alert-bar"></div>
   <div class="tbl-wrap">
     <table id="admin-tbl">
-      <thead id="admin-thead"><tr><th class="th-name">氏名</th><th class="th-day th-tocho">1<br><span style="font-size:9px">金</span><br><span style="font-size:7px">当</span></th><th class="th-day th-sat">2<br><span style="font-size:9px">土</span></th><th class="th-day th-sun">3<br><span style="font-size:9px">日</span><br><span style="font-size:7px">祝</span></th><th class="th-day th-hol">4<br><span style="font-size:9px">月</span><br><span style="font-size:7px">祝</span></th><th class="th-day th-hol">5<br><span style="font-size:9px">火</span><br><span style="font-size:7px">祝</span></th><th class="th-day th-hol">6<br><span style="font-size:9px">水</span><br><span style="font-size:7px">祝</span></th><th class="th-day">7<br><span style="font-size:9px">木</span></th><th class="th-day">8<br><span style="font-size:9px">金</span></th><th class="th-day th-sat">9<br><span style="font-size:9px">土</span></th><th class="th-day th-sun">10<br><span style="font-size:9px">日</span></th><th class="th-day th-tocho">11<br><span style="font-size:9px">月</span><br><span style="font-size:7px">当</span></th><th class="th-day">12<br><span style="font-size:9px">火</span></th><th class="th-day">13<br><span style="font-size:9px">水</span></th><th class="th-day">14<br><span style="font-size:9px">木</span></th><th class="th-day">15<br><span style="font-size:9px">金</span></th><th class="th-day th-sat">16<br><span style="font-size:9px">土</span></th><th class="th-day th-sun th-tocho">17<br><span style="font-size:9px">日</span><br><span style="font-size:7px">当</span></th><th class="th-day">18<br><span style="font-size:9px">月</span></th><th class="th-day">19<br><span style="font-size:9px">火</span></th><th class="th-day">20<br><span style="font-size:9px">水</span></th><th class="th-day">21<br><span style="font-size:9px">木</span></th><th class="th-day th-tocho">22<br><span style="font-size:9px">金</span><br><span style="font-size:7px">当</span></th><th class="th-day th-sat">23<br><span style="font-size:9px">土</span></th><th class="th-day th-sun">24<br><span style="font-size:9px">日</span></th><th class="th-day">25<br><span style="font-size:9px">月</span></th><th class="th-day">26<br><span style="font-size:9px">火</span></th><th class="th-day">27<br><span style="font-size:9px">水</span></th><th class="th-day th-tocho">28<br><span style="font-size:9px">木</span><br><span style="font-size:7px">当</span></th><th class="th-day">29<br><span style="font-size:9px">金</span></th><th class="th-day th-sat">30<br><span style="font-size:9px">土</span></th><th class="th-day th-sun">31<br><span style="font-size:9px">日</span></th><th class="th-sum">日勤計</th><th class="th-sum">当直計</th><th class="th-sum">週休計</th><th class="th-sum">有給計</th><th class="th-sum">有給残</th></tr></thead>
-      <tbody id="admin-tbody"><tr><td class="td-name">畠山</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="td-sum" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">18</td><td class="td-sum" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td class="td-sum c-over" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">13 +3</td><td class="td-sum" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">0</td><td class="td-sum c-ok">残31日</td></tr><tr><td class="td-name">横田</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="td-sum" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">18</td><td class="td-sum" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td class="td-sum c-over" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">13 +3</td><td class="td-sum" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">0</td><td class="td-sum c-ok">残36日</td></tr><tr><td class="td-name">髙松</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="td-sum" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">18</td><td class="td-sum" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td class="td-sum c-over" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">13 +3</td><td class="td-sum" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">0</td><td class="td-sum c-ok">残33日</td></tr><tr><td class="td-name">工藤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="td-sum" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">18</td><td class="td-sum" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td class="td-sum c-over" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">13 +3</td><td class="td-sum" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">0</td><td class="td-sum c-ok">残34日</td></tr><tr><td class="td-name">平</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="td-sum" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">18</td><td class="td-sum" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td class="td-sum c-over" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">13 +3</td><td class="td-sum" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">0</td><td class="td-sum c-ok">残16日</td></tr><tr><td class="td-name">長瀨</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="td-sum" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">18</td><td class="td-sum" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td class="td-sum c-over" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">13 +3</td><td class="td-sum" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">0</td><td class="td-sum c-ok">残15.5日</td></tr><tr><td class="td-name">岩城</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="td-sum" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">18</td><td class="td-sum" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td class="td-sum c-over" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">13 +3</td><td class="td-sum" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">0</td><td class="td-sum c-ok">残17日</td></tr><tr><td class="td-name">陳祐</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">日勤</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="cell" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">週休</td><td class="td-sum" style="background: rgb(219, 234, 254); color: rgb(30, 64, 175);">18</td><td class="td-sum" style="background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td class="td-sum c-over" style="background: rgb(241, 240, 234); color: rgb(87, 83, 78);">13 +3</td><td class="td-sum" style="background: rgb(252, 231, 243); color: rgb(157, 23, 77);">0</td><td class="td-sum c-warn">残0日</td></tr></tbody>
-      <tfoot id="admin-tfoot"><tr><td class="td-name">当直数</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(254, 226, 226); color: rgb(153, 27, 27);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td style="font-weight: 500; font-size: 10px; text-align: center; padding: 3px 2px; background: rgb(240, 239, 233); color: rgb(160, 158, 151);">0</td><td></td><td></td><td></td><td></td><td></td></tr><tr class="taiki-row"><td class="td-name" style="font-size: 10px; color: rgb(22, 101, 52); font-weight: 500; padding: 3px 6px; background: rgb(240, 253, 244);">待機者</td><td class="taiki-name-cell" style="color: rgb(160, 158, 151);">—</td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" style="color: rgb(160, 158, 151);">—</td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" style="color: rgb(160, 158, 151);">—</td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" style="color: rgb(160, 158, 151);">—</td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" style="color: rgb(160, 158, 151);">—</td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td class="taiki-name-cell" title=""></td><td></td><td></td><td></td><td></td><td></td></tr></tfoot>
+      <thead id="admin-thead"></thead>
+      <tbody id="admin-tbody"></tbody>
+      <tfoot id="admin-tfoot"></tfoot>
     </table>
   </div>
-  <div class="stat-bar" id="stat-bar"><div class="stat"><div class="stat-label">当直計</div><div class="stat-val" style="color:#991b1b">0</div><div class="stat-sub">今月</div></div><div class="stat"><div class="stat-label">希望休</div><div class="stat-val" style="color:#854d0e">0</div><div class="stat-sub">件</div></div><div class="stat"><div class="stat-label">希望勤務</div><div class="stat-val" style="color:#166534">0</div><div class="stat-sub">件</div></div><div class="stat"><div class="stat-label">条件違反</div><div class="stat-val" style="color:#166534">0</div><div class="stat-sub">要確認</div></div></div>
+  <div class="stat-bar" id="stat-bar"></div>
 </div>
 
 <!-- 設定 -->
-<div class="scr on" id="scr-settings">
+<div class="scr" id="scr-settings">
   <div class="set-layout">
     <div class="card set-nav" id="set-nav">
-      <button class="set-nav-btn" onclick="showSetPanel('basic')">基本設定</button>
+      <button class="set-nav-btn on" onclick="showSetPanel('basic')">基本設定</button>
       <button class="set-nav-btn" onclick="showSetPanel('staff')">スタッフ管理</button>
       <button class="set-nav-btn" onclick="showSetPanel('shifts')">勤務種別</button>
       <button class="set-nav-btn" onclick="showSetPanel('shukyu')">週休規定日数</button>
       <button class="set-nav-btn" onclick="showSetPanel('tocho')">当直・救急日</button>
       <button class="set-nav-btn" onclick="showSetPanel('nenkyu')">有給管理</button>
-      <button class="set-nav-btn on" onclick="showSetPanel('data')">データ</button>
+      <button class="set-nav-btn" onclick="showSetPanel('data')">データ</button>
     </div>
     <div class="card">
-      <div class="set-panel" id="sp-basic">
+      <div class="set-panel on" id="sp-basic">
         <div class="sec-label">基本設定</div>
         <div class="set-row"><div style="flex:1"><div class="set-label">科名・タイトル</div></div><input class="inp" id="cfg-title" value="放射線科" style="width:140px" onchange="saveCfg()"></div>
-        <div class="set-row"><div style="flex:1"><div class="set-label">当直 → 翌日を明けに自動セット</div></div><label class="toggle"><input type="checkbox" id="cfg-auto-ake" checked="" onchange="saveCfg()"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>
+        <div class="set-row"><div style="flex:1"><div class="set-label">当直 → 翌日を明けに自動セット</div></div><label class="toggle"><input type="checkbox" id="cfg-auto-ake" checked onchange="saveCfg()"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>
         <div class="set-row"><div style="flex:1"><div class="set-label">月間 希望休の上限日数</div><div class="set-desc">超過時は警告のみ（週休には反映）</div></div><input type="number" class="inp" id="cfg-wish-limit" value="6" min="0" max="31" style="width:70px" onchange="saveCfg()"><span style="font-size:12px;color:var(--text2)">日</span></div>
         <div class="set-row"><div style="flex:1"><div class="set-label">1日あたりの希望休 上限人数（平日）</div><div class="set-desc">超過時は警告のみ（登録は可能）</div></div><input type="number" class="inp" id="cfg-wish-day-limit" value="2" min="1" max="20" style="width:70px" onchange="saveCfg()"><span style="font-size:12px;color:var(--text2)">名</span></div>
       </div>
       <div class="set-panel" id="sp-staff">
         <div class="sec-label">スタッフ管理</div>
-        <div id="staff-mgr-list"><div class="staff-mgr-item" draggable="true" data-idx="0"><span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">畠山 智史</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(0,-1)">▲</button><button class="smgr-mv" onclick="moveStaff(0,1)">▼</button><button class="smgr-del" onclick="removeStaff(0)">削除</button></div></div><div class="staff-mgr-item" draggable="true" data-idx="1"><span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">横田 崇</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(1,-1)">▲</button><button class="smgr-mv" onclick="moveStaff(1,1)">▼</button><button class="smgr-del" onclick="removeStaff(1)">削除</button></div></div><div class="staff-mgr-item" draggable="true" data-idx="2"><span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">髙松 勇佑</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(2,-1)">▲</button><button class="smgr-mv" onclick="moveStaff(2,1)">▼</button><button class="smgr-del" onclick="removeStaff(2)">削除</button></div></div><div class="staff-mgr-item" draggable="true" data-idx="3"><span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">工藤 哲史</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(3,-1)">▲</button><button class="smgr-mv" onclick="moveStaff(3,1)">▼</button><button class="smgr-del" onclick="removeStaff(3)">削除</button></div></div><div class="staff-mgr-item" draggable="true" data-idx="4"><span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">平 修一</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(4,-1)">▲</button><button class="smgr-mv" onclick="moveStaff(4,1)">▼</button><button class="smgr-del" onclick="removeStaff(4)">削除</button></div></div><div class="staff-mgr-item" draggable="true" data-idx="5"><span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">長瀨 一希</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(5,-1)">▲</button><button class="smgr-mv" onclick="moveStaff(5,1)">▼</button><button class="smgr-del" onclick="removeStaff(5)">削除</button></div></div><div class="staff-mgr-item" draggable="true" data-idx="6"><span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">岩城 くるみ</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(6,-1)">▲</button><button class="smgr-mv" onclick="moveStaff(6,1)">▼</button><button class="smgr-del" onclick="removeStaff(6)">削除</button></div></div><div class="staff-mgr-item" draggable="true" data-idx="7"><span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">陳祐 綾花</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(7,-1)">▲</button><button class="smgr-mv" onclick="moveStaff(7,1)">▼</button><button class="smgr-del" onclick="removeStaff(7)">削除</button></div></div></div>
+        <div id="staff-mgr-list"></div>
         <div class="add-row"><input class="add-inp" id="add-staff-inp" placeholder="氏名を入力（例：田中 太郎）" onkeydown="if(event.key==='Enter')addStaff()"><button class="btn primary" onclick="addStaff()">追加</button></div>
         <div class="note-box">⠿ をドラッグ または ▲▼ ボタンで並び替え</div>
       </div>
       <div class="set-panel" id="sp-shifts">
         <div class="sec-label">勤務種別のカスタマイズ</div>
         <div class="shift-hdr"><div></div><div>種別名</div><div>カウント</div><div>集計グループ</div><div>色</div><div>表示</div><div></div></div>
-        <div id="shift-list"><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#dbeafe;color:#1e40af" contenteditable="true" onblur="SHIFTS[0].l=this.textContent.trim();saveAll()">日勤</div><select class="sh-select" onchange="SHIFTS[0].count=parseFloat(this.value);saveAll()"><option>0</option><option>0.5</option><option selected="">1</option></select><select class="sh-select" onchange="SHIFTS[0].group=this.value;saveAll()"><option selected="">日勤</option><option>当直</option><option>週休</option><option>有給</option><option>なし</option></select><input type="color" value="#dbeafe" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[0].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[0].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(0)">×</div></div><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#d1fae5;color:#065f46" contenteditable="true" onblur="SHIFTS[1].l=this.textContent.trim();saveAll()">早出</div><select class="sh-select" onchange="SHIFTS[1].count=parseFloat(this.value);saveAll()"><option>0</option><option>0.5</option><option selected="">1</option></select><select class="sh-select" onchange="SHIFTS[1].group=this.value;saveAll()"><option selected="">日勤</option><option>当直</option><option>週休</option><option>有給</option><option>なし</option></select><input type="color" value="#d1fae5" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[1].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[1].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(1)">×</div></div><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#fee2e2;color:#991b1b" contenteditable="true" onblur="SHIFTS[2].l=this.textContent.trim();saveAll()">当直</div><select class="sh-select" onchange="SHIFTS[2].count=parseFloat(this.value);saveAll()"><option>0</option><option>0.5</option><option selected="">1</option></select><select class="sh-select" onchange="SHIFTS[2].group=this.value;saveAll()"><option>日勤</option><option selected="">当直</option><option>週休</option><option>有給</option><option>なし</option></select><input type="color" value="#fee2e2" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[2].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[2].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(2)">×</div></div><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#fef3c7;color:#92400e" contenteditable="true" onblur="SHIFTS[3].l=this.textContent.trim();saveAll()">明け</div><select class="sh-select" onchange="SHIFTS[3].count=parseFloat(this.value);saveAll()"><option selected="">0</option><option>0.5</option><option>1</option></select><select class="sh-select" onchange="SHIFTS[3].group=this.value;saveAll()"><option>日勤</option><option>当直</option><option>週休</option><option>有給</option><option selected="">なし</option></select><input type="color" value="#fef3c7" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[3].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[3].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(3)">×</div></div><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#dcfce7;color:#166534" contenteditable="true" onblur="SHIFTS[4].l=this.textContent.trim();saveAll()">待機</div><select class="sh-select" onchange="SHIFTS[4].count=parseFloat(this.value);saveAll()"><option selected="">0</option><option>0.5</option><option>1</option></select><select class="sh-select" onchange="SHIFTS[4].group=this.value;saveAll()"><option>日勤</option><option>当直</option><option>週休</option><option>有給</option><option selected="">なし</option></select><input type="color" value="#dcfce7" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[4].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[4].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(4)">×</div></div><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#f1f0ea;color:#57534e" contenteditable="true" onblur="SHIFTS[5].l=this.textContent.trim();saveAll()">週休</div><select class="sh-select" onchange="SHIFTS[5].count=parseFloat(this.value);saveAll()"><option>0</option><option>0.5</option><option selected="">1</option></select><select class="sh-select" onchange="SHIFTS[5].group=this.value;saveAll()"><option>日勤</option><option>当直</option><option selected="">週休</option><option>有給</option><option>なし</option></select><input type="color" value="#f1f0ea" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[5].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[5].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(5)">×</div></div><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#fce7f3;color:#9d174d" contenteditable="true" onblur="SHIFTS[6].l=this.textContent.trim();saveAll()">年休</div><select class="sh-select" onchange="SHIFTS[6].count=parseFloat(this.value);saveAll()"><option>0</option><option>0.5</option><option selected="">1</option></select><select class="sh-select" onchange="SHIFTS[6].group=this.value;saveAll()"><option>日勤</option><option>当直</option><option>週休</option><option selected="">有給</option><option>なし</option></select><input type="color" value="#fce7f3" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[6].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[6].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(6)">×</div></div><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#ede9fe;color:#4c1d95" contenteditable="true" onblur="SHIFTS[7].l=this.textContent.trim();saveAll()">午前(週休)</div><select class="sh-select" onchange="SHIFTS[7].count=parseFloat(this.value);saveAll()"><option>0</option><option selected="">0.5</option><option>1</option></select><select class="sh-select" onchange="SHIFTS[7].group=this.value;saveAll()"><option>日勤</option><option>当直</option><option selected="">週休</option><option>有給</option><option>なし</option></select><input type="color" value="#ede9fe" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[7].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[7].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(7)">×</div></div><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#ffedd5;color:#7c2d12" contenteditable="true" onblur="SHIFTS[8].l=this.textContent.trim();saveAll()">午前(年休)</div><select class="sh-select" onchange="SHIFTS[8].count=parseFloat(this.value);saveAll()"><option>0</option><option selected="">0.5</option><option>1</option></select><select class="sh-select" onchange="SHIFTS[8].group=this.value;saveAll()"><option>日勤</option><option>当直</option><option>週休</option><option selected="">有給</option><option>なし</option></select><input type="color" value="#ffedd5" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[8].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[8].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(8)">×</div></div><div class="shift-row"><div class="sh-handle">⠿</div><div class="sh-chip" style="background:#f0efe9;color:#a09e97" contenteditable="true" onblur="SHIFTS[9].l=this.textContent.trim();saveAll()">―</div><select class="sh-select" onchange="SHIFTS[9].count=parseFloat(this.value);saveAll()"><option selected="">0</option><option>0.5</option><option>1</option></select><select class="sh-select" onchange="SHIFTS[9].group=this.value;saveAll()"><option>日勤</option><option>当直</option><option>週休</option><option>有給</option><option selected="">なし</option></select><input type="color" value="#f0efe9" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[9].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[9].visible=this.value==='表示';saveAll()"><option selected="">表示</option><option>非表示</option></select><div class="sh-del" onclick="removeShift(9)">×</div></div></div>
+        <div id="shift-list"></div>
         <button class="btn" style="width:100%;margin-top:4px;border-style:dashed" onclick="addShift()">＋ 勤務種別を追加</button>
         <div class="sec-label" style="margin-top:16px">集計グループ管理</div>
-        <div id="grp-list"><div class="grp-row"><input class="grp-inp" value="日勤" onchange="GROUPS[0].name=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="GROUPS[0].special=this.value==='なし'?null:this.value;saveAll()"><option value="なし">特殊なし</option><option value="shukyu">週休（差分表示）</option><option value="nenkyu">有給（残日数）</option></select><div class="sh-del" onclick="removeGroup(0)">×</div></div><div class="grp-row"><input class="grp-inp" value="当直" onchange="GROUPS[1].name=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="GROUPS[1].special=this.value==='なし'?null:this.value;saveAll()"><option value="なし">特殊なし</option><option value="shukyu">週休（差分表示）</option><option value="nenkyu">有給（残日数）</option></select><div class="sh-del" onclick="removeGroup(1)">×</div></div><div class="grp-row"><input class="grp-inp" value="週休" onchange="GROUPS[2].name=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="GROUPS[2].special=this.value==='なし'?null:this.value;saveAll()"><option value="なし">特殊なし</option><option value="shukyu" selected="">週休（差分表示）</option><option value="nenkyu">有給（残日数）</option></select><div class="sh-del" onclick="removeGroup(2)">×</div></div><div class="grp-row"><input class="grp-inp" value="有給" onchange="GROUPS[3].name=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="GROUPS[3].special=this.value==='なし'?null:this.value;saveAll()"><option value="なし">特殊なし</option><option value="shukyu">週休（差分表示）</option><option value="nenkyu" selected="">有給（残日数）</option></select><div class="sh-del" onclick="removeGroup(3)">×</div></div></div>
+        <div id="grp-list"></div>
         <button class="btn" style="width:100%;margin-top:4px;border-style:dashed" onclick="addGroup()">＋ 集計グループを追加</button>
         <div class="note-box">グループ名が管理者画面の集計欄名になります。</div>
       </div>
       <div class="set-panel" id="sp-shukyu">
         <div class="sec-label">月別 週休規定日数</div>
         <div style="font-size:12px;color:var(--text2);margin-bottom:8px">各月の週休規定日数（差分を管理者画面の週休計欄に表示）</div>
-        <div class="msk-grid" id="msk-grid"><div class="msk-item"><div class="msk-label">1月</div><input type="number" class="msk-inp" min="0" max="31" value="11" onchange="shukyuKijun[1]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">2月</div><input type="number" class="msk-inp" min="0" max="31" value="8" onchange="shukyuKijun[2]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">3月</div><input type="number" class="msk-inp" min="0" max="31" value="9" onchange="shukyuKijun[3]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">4月</div><input type="number" class="msk-inp" min="0" max="31" value="9" onchange="shukyuKijun[4]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">5月</div><input type="number" class="msk-inp" min="0" max="31" value="10" onchange="shukyuKijun[5]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">6月</div><input type="number" class="msk-inp" min="0" max="31" value="9" onchange="shukyuKijun[6]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">7月</div><input type="number" class="msk-inp" min="0" max="31" value="9" onchange="shukyuKijun[7]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">8月</div><input type="number" class="msk-inp" min="0" max="31" value="9" onchange="shukyuKijun[8]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">9月</div><input type="number" class="msk-inp" min="0" max="31" value="9" onchange="shukyuKijun[9]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">10月</div><input type="number" class="msk-inp" min="0" max="31" value="9" onchange="shukyuKijun[10]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">11月</div><input type="number" class="msk-inp" min="0" max="31" value="9" onchange="shukyuKijun[11]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div><div class="msk-item"><div class="msk-label">12月</div><input type="number" class="msk-inp" min="0" max="31" value="9" onchange="shukyuKijun[12]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div></div></div>
+        <div class="msk-grid" id="msk-grid"></div>
       </div>
       <div class="set-panel" id="sp-tocho">
-        <div class="sec-label">当直・救急日（<span id="tc-month-label">2026年5月</span>）</div>
+        <div class="sec-label">当直・救急日（<span id="tc-month-label"></span>）</div>
         <div class="note-box" style="margin-bottom:8px">当直日：必要人数 <strong>2名</strong>　当直日以外：待機者 <strong>1名以上</strong></div>
         <div class="cal-dow" style="margin-bottom:3px"><div style="color:#991b1b">日</div><div>月</div><div>火</div><div>水</div><div>木</div><div>金</div><div style="color:#1e40af">土</div></div>
-        <div class="tocho-cal-grid" id="tc-cal"><div class="tc-cell empty"></div><div class="tc-cell empty"></div><div class="tc-cell empty"></div><div class="tc-cell empty"></div><div class="tc-cell empty"></div><div class="tc-cell tocho">1</div><div class="tc-cell sat">2</div><div class="tc-cell hol">3</div><div class="tc-cell hol">4</div><div class="tc-cell hol">5</div><div class="tc-cell hol">6</div><div class="tc-cell">7</div><div class="tc-cell">8</div><div class="tc-cell sat">9</div><div class="tc-cell sun">10</div><div class="tc-cell tocho">11</div><div class="tc-cell">12</div><div class="tc-cell">13</div><div class="tc-cell">14</div><div class="tc-cell">15</div><div class="tc-cell sat">16</div><div class="tc-cell sun tocho">17</div><div class="tc-cell">18</div><div class="tc-cell">19</div><div class="tc-cell">20</div><div class="tc-cell">21</div><div class="tc-cell tocho">22</div><div class="tc-cell sat">23</div><div class="tc-cell sun">24</div><div class="tc-cell">25</div><div class="tc-cell">26</div><div class="tc-cell">27</div><div class="tc-cell tocho">28</div><div class="tc-cell">29</div><div class="tc-cell sat">30</div><div class="tc-cell sun">31</div></div>
-        <div style="margin-top:10px;font-size:12px;color:var(--text2)">設定済み：<span id="tc-days-label" style="font-weight:500;color:var(--text)">1日・11日・17日・22日・28日</span></div>
+        <div class="tocho-cal-grid" id="tc-cal"></div>
+        <div style="margin-top:10px;font-size:12px;color:var(--text2)">設定済み：<span id="tc-days-label" style="font-weight:500;color:var(--text)">なし</span></div>
       </div>
       <div class="set-panel" id="sp-nenkyu">
-        <div class="sec-label">有給管理（<span id="nk-year-label">2026</span>年度）</div>
-        <div id="nk-list"><div class="nk-row" style="font-size: 10px; font-weight: 500; color: var(--text3); background: none; padding: 2px 10px; min-height: auto;"><div>氏名</div><div>本年度付与</div><div>前年度繰越</div><div>消化合計／残</div></div><div class="nk-row"><div class="nk-name">畠山</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="20" onchange="if(!nenkyuData['畠山 智史'])nenkyuData['畠山 智史']={grant:0,carry:0};nenkyuData['畠山 智史'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="11" onchange="if(!nenkyuData['畠山 智史'])nenkyuData['畠山 智史']={grant:0,carry:0};nenkyuData['畠山 智史'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status c-ok">消化0日 ／ 残31日</div></div><div class="nk-row"><div class="nk-name">横田</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="20" onchange="if(!nenkyuData['横田 崇'])nenkyuData['横田 崇']={grant:0,carry:0};nenkyuData['横田 崇'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="16" onchange="if(!nenkyuData['横田 崇'])nenkyuData['横田 崇']={grant:0,carry:0};nenkyuData['横田 崇'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status c-ok">消化0日 ／ 残36日</div></div><div class="nk-row"><div class="nk-name">髙松</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="20" onchange="if(!nenkyuData['髙松 勇佑'])nenkyuData['髙松 勇佑']={grant:0,carry:0};nenkyuData['髙松 勇佑'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="13" onchange="if(!nenkyuData['髙松 勇佑'])nenkyuData['髙松 勇佑']={grant:0,carry:0};nenkyuData['髙松 勇佑'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status c-ok">消化0日 ／ 残33日</div></div><div class="nk-row"><div class="nk-name">工藤</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="20" onchange="if(!nenkyuData['工藤 哲史'])nenkyuData['工藤 哲史']={grant:0,carry:0};nenkyuData['工藤 哲史'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="14" onchange="if(!nenkyuData['工藤 哲史'])nenkyuData['工藤 哲史']={grant:0,carry:0};nenkyuData['工藤 哲史'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status c-ok">消化0日 ／ 残34日</div></div><div class="nk-row"><div class="nk-name">平</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="16" onchange="if(!nenkyuData['平 修一'])nenkyuData['平 修一']={grant:0,carry:0};nenkyuData['平 修一'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="0" onchange="if(!nenkyuData['平 修一'])nenkyuData['平 修一']={grant:0,carry:0};nenkyuData['平 修一'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status c-ok">消化0日 ／ 残16日</div></div><div class="nk-row"><div class="nk-name">長瀨</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="11" onchange="if(!nenkyuData['長瀨 一希'])nenkyuData['長瀨 一希']={grant:0,carry:0};nenkyuData['長瀨 一希'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="4.5" onchange="if(!nenkyuData['長瀨 一希'])nenkyuData['長瀨 一希']={grant:0,carry:0};nenkyuData['長瀨 一希'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status c-ok">消化0日 ／ 残15.5日</div></div><div class="nk-row"><div class="nk-name">岩城</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="10" onchange="if(!nenkyuData['岩城 くるみ'])nenkyuData['岩城 くるみ']={grant:0,carry:0};nenkyuData['岩城 くるみ'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="7" onchange="if(!nenkyuData['岩城 くるみ'])nenkyuData['岩城 くるみ']={grant:0,carry:0};nenkyuData['岩城 くるみ'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status c-ok">消化0日 ／ 残17日</div></div><div class="nk-row"><div class="nk-name">陳祐</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="0" onchange="if(!nenkyuData['陳祐 綾花'])nenkyuData['陳祐 綾花']={grant:0,carry:0};nenkyuData['陳祐 綾花'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="0" onchange="if(!nenkyuData['陳祐 綾花'])nenkyuData['陳祐 綾花']={grant:0,carry:0};nenkyuData['陳祐 綾花'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status c-warn">消化0日 ／ 残0日</div></div></div>
+        <div class="sec-label">有給管理（<span id="nk-year-label"></span>年度）</div>
+        <div id="nk-list"></div>
         <div style="margin-top:12px"><button class="btn warn" onclick="updateNenkyu()">有給を更新する（10月）</button></div>
         <div class="note-box">「有給を更新する」を押すと残日数が前年度繰越に自動セットされます。</div>
       </div>
-      <div class="set-panel on" id="sp-data">
+      <div class="set-panel" id="sp-data">
         <div class="sec-label">データ保存・読み込み</div>
         <div class="set-row"><div style="flex:1"><div class="set-label">自動保存</div><div class="set-desc">Firebaseにリアルタイム保存（常時ON）</div></div><span style="font-size:11px;color:var(--text3)">常時ON</span></div>
         <div class="data-actions">
@@ -763,26 +763,19 @@ function serializeStaffData(sd){
   return out;
 }
 function serializeTochoDays(){
-  const out={};
-  Object.entries(tochoDays).forEach(([m,s])=>{
-    // キーを数値に正規化してから文字列で保存（Firebase往復後も一致するよう）
-    if(s instanceof Set) out[Number(m)]=[...s];
-  });
-  return out;
+  const out={};Object.entries(tochoDays).forEach(([m,s])=>{out[m]=[...(s||[])];});return out;
 }
 
 /* ══ SAVE / LOAD (Firebase) ══ */
-// デバウンスタイマー：連続変更を600ms待ってまとめて1回だけ保存する
-let _saveTimer = null;
 function saveAll(){
-  clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(() => {
-    const payload={cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
-      tochoDays:serializeTochoDays(),
-      staffData:serializeStaffData(staffData),
-      schedData,nenkyuData,year,month};
-    if(typeof window._fbSave==='function') window._fbSave(payload);
-  }, 600);
+  // Firebaseにリアルタイム保存（window._fbSaveはtype=moduleで定義済み）
+  const payload={cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
+    tochoDays:serializeTochoDays(),
+    staffData:serializeStaffData(staffData),
+    schedData,nenkyuData,year,month};
+  if(typeof window._fbSave==='function') window._fbSave(payload);
+  // ページ離脱時用に最新ペイロードをキャッシュ
+  window._lastPayload = payload;
 }
 function loadAll(){
   // Firebase onValue で自動同期されるため、初期ロードはfalseを返してseedDemoを走らせる
@@ -794,884 +787,997 @@ function exportData(){
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.json`;a.click();
 }
 function exportHtml(){
+  // 現在のデータをシリアライズ
   const snapshot=JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
     tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),
     schedData,nenkyuData,year,month});
-  // script終了タグを <\/script> にエスケープしてHTML内での早期終了を防ぐ
-  const safeSnap=snapshot.replace(/<\//g,'<\\/');
-  const TAG_OPEN ='<'+'script id="kinmuhyo-snap">';
-  const TAG_CLOSE='<'+'/script>';
-  const snapBody = [
-    '(function(){',
-    'const _snap='+safeSnap+';',
-    'if(_snap.cfg)cfg=_snap.cfg;',
-    'if(_snap.STAFF)STAFF=_snap.STAFF;',
-    'if(_snap.SHIFTS)SHIFTS=_snap.SHIFTS;',
-    'if(_snap.GROUPS)GROUPS=_snap.GROUPS;',
-    'if(_snap.shukyuKijun)shukyuKijun=_snap.shukyuKijun;',
-    'if(_snap.tochoDays){tochoDays={};Object.entries(_snap.tochoDays).forEach(([m,a])=>{tochoDays[Number(m)]=new Set(Array.isArray(a)?a:[]);});}',
-    'if(_snap.nenkyuData)nenkyuData=_snap.nenkyuData;',
-    'if(_snap.schedData){schedData={};Object.entries(_snap.schedData).forEach(([m,v])=>{if(v!=null)schedData[Number(m)]=v;});}',
-    'if(_snap.year!=null)year=Number(_snap.year);',
-    'if(_snap.month!=null)month=Number(_snap.month);',
-    'if(_snap.staffData){staffData={};Object.entries(_snap.staffData).forEach(([n,mv])=>{staffData[n]={};Object.entries(mv).forEach(([mo,dv])=>{staffData[n][Number(mo)]={};Object.entries(dv).forEach(([d,v])=>{staffData[n][Number(mo)][Number(d)]={...v,ng:new Set(Array.isArray(v.ng)?v.ng:[])};});});});}',
-    'if(typeof initAll===\'function\')initAll();',
-    '})()',
-  ].join('\n');
-  const snapScript = TAG_OPEN + snapBody + TAG_CLOSE;
-  let html = document.documentElement.outerHTML;
-  // 既存のkinmuhyo-snapタグを置換、なければ</body>直前に挿入
-  const si = html.indexOf(TAG_OPEN);
-  if(si !== -1){
-    // TAG_OPENの終端からTAG_CLOSEを検索
-    const searchFrom = si + TAG_OPEN.length;
-    const ei = html.indexOf(TAG_CLOSE, searchFrom);
-    if(ei !== -1){
-      html = html.slice(0, si) + snapScript + html.slice(ei + TAG_CLOSE.length);
-    } else {
-      // TAG_CLOSEが見つからない異常系: bodyの直前に挿入
-      html = html.replace('<'+'/body>', snapScript + '<'+'/body>');
-    }
-  } else {
-    html = html.replace('<'+'/body>', snapScript + '<'+'/body>');
-  }
-  const blob = new Blob([html], {type:'text/html'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'kinmuhyo_'+year+'_'+String(month).padStart(2,'0')+'.html';
-  a.click();
+
+  // 注入するスナップショット復元スクリプト
+  const marker='<!-- KINMUHYO_SNAPSHOT -->';
+  const inject=`${marker}\n<script id="kinmuhyo-snap">
+(function(){
+  try{
+    const _snap=${snapshot};
+    window._snapLoaded=true;
+    if(_snap.cfg)cfg=_snap.cfg;
+    if(_snap.STAFF)STAFF=_snap.STAFF;
+    if(_snap.SHIFTS)SHIFTS=_snap.SHIFTS;
+    if(_snap.GROUPS)GROUPS=_snap.GROUPS;
+    if(_snap.shukyuKijun)shukyuKijun=_snap.shukyuKijun;
+    if(_snap.tochoDays){tochoDays={};Object.entries(_snap.tochoDays).forEach(([m,a])=>{tochoDays[m]=new Set(a);});}
+    if(_snap.nenkyuData)nenkyuData=_snap.nenkyuData;
+    if(_snap.schedData)schedData=_snap.schedData;
+    if(_snap.year)year=_snap.year;
+    if(_snap.month)month=_snap.month;
+    if(_snap.staffData){staffData={};Object.entries(_snap.staffData).forEach(([n,mv])=>{staffData[n]={};Object.entries(mv).forEach(([mo,dv])=>{staffData[n][mo]={};Object.entries(dv).forEach(([d,v])=>{staffData[n][mo][d]={...v,ng:new Set(v.ng||[])};});});});}
+    if(typeof initAll==='function')initAll();
+  }catch(e){console.error('スナップショット復元エラー:',e);}
+})();
+<\/script>`;
+
+  // fetch でオリジナルのHTMLソースを取得して注入
+  // （outerHTMLだとDOM変更・ログイン状態・動的スタイルが混入するため使わない）
+  fetch(location.href)
+    .then(r=>r.text())
+    .then(html=>{
+      // 既存スナップショットがあれば除去
+      if(html.includes(marker)){
+        html=html.replace(/<!-- KINMUHYO_SNAPSHOT -->[\s\S]*?<\/script>/,'');
+      }
+      // </body>の直前に注入
+      if(html.includes('</body>')){
+        html=html.replace('</body>',inject+'\n</body>');
+      } else {
+        html=html+inject;
+      }
+      const blob=new Blob([html],{type:'text/html;charset=utf-8'});
+      const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.html`;
+      a.click();URL.revokeObjectURL(a.href);
+    })
+    .catch(()=>{
+      // fetchが失敗した場合（ファイルプロトコル等）はouterHTMLにフォールバック
+      let html=document.documentElement.outerHTML;
+      if(html.includes(marker)){
+        html=html.replace(/<!-- KINMUHYO_SNAPSHOT -->[\s\S]*?<\/script>/,'');
+      }
+      html=html.replace('</body>',inject+'\n</body>');
+      const blob=new Blob(['<!DOCTYPE html>\n'+html],{type:'text/html;charset=utf-8'});
+      const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.html`;
+      a.click();URL.revokeObjectURL(a.href);
+    });
+}
+function importData(e){
+  const file=e.target.files[0];if(!file)return;
+  const reader=new FileReader();
+  reader.onload=ev=>{
+    try{
+      const data=JSON.parse(ev.target.result);
+      if(data.cfg)cfg=data.cfg;if(data.STAFF)STAFF=data.STAFF;if(data.SHIFTS)SHIFTS=data.SHIFTS;
+      if(data.GROUPS)GROUPS=data.GROUPS;if(data.shukyuKijun)shukyuKijun=data.shukyuKijun;
+      if(data.tochoDays){tochoDays={};Object.entries(data.tochoDays).forEach(([m,a])=>{tochoDays[m]=new Set(a);});}
+      if(data.nenkyuData)nenkyuData=data.nenkyuData;if(data.schedData)schedData=data.schedData;
+      if(data.year)year=data.year;if(data.month)month=data.month;
+      if(data.staffData){staffData={};Object.entries(data.staffData).forEach(([n,mv])=>{staffData[n]={};Object.entries(mv).forEach(([mo,dv])=>{staffData[n][mo]={};Object.entries(dv).forEach(([d,v])=>{staffData[n][mo][d]={...v,ng:new Set(v.ng||[])};});});});}
+      saveAll();initAll();alert('データを読み込みました');
+    }catch(err){alert('読み込みに失敗しました');}
+  };
+  reader.readAsText(file);e.target.value='';
+}
+function clearData(){if(!confirm('すべてのデータを削除しますか？'))return;location.reload();}
+
+/* ══ SCREEN / MONTH ══ */
+function showScreen(s){
+  document.querySelectorAll('.scr').forEach(el=>el.classList.remove('on'));
+  document.querySelectorAll('.tab').forEach(el=>el.classList.remove('on'));
+  document.getElementById('scr-'+s).classList.add('on');
+  const tabs=document.querySelectorAll('.tab');
+  if(s==='staff')tabs[0].classList.add('on');
+  if(s==='admin')tabs[1].classList.add('on');
+  if(s==='settings')tabs[2].classList.add('on');
+  if(s==='admin'){ensureSchedule(month);renderAdmin();}
+  if(s==='settings')renderSettings();
+  if(s==='staff'){renderStaffCal();renderSummary();renderYkCard();renderICS();}
+}
+function changeMonth(dir){
+  month+=dir;if(month>12){month=1;year++;}if(month<1){month=12;year--;}
+  document.getElementById('month-label').textContent=`${year}年 ${month}月`;
+  selectedDay=null;kibouSelected=null;hideDetail();ensureSchedule(month);saveAll();
+  const active=document.querySelector('.scr.on').id;
+  if(active==='scr-staff'){renderStaffCal();renderSummary();renderYkCard();renderICS();}
+  if(active==='scr-admin')renderAdmin();
+  if(active==='scr-settings')renderTochoCal();
 }
 
-/* ══ UI / SCREEN ══ */
-function showScreen(id){
-  document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on'));
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
-  const scr=document.getElementById('scr-'+id);
-  if(scr) scr.classList.add('on');
-  document.querySelectorAll('.tab').forEach(t=>{
-    if(t.getAttribute('onclick')&&t.getAttribute('onclick').includes("'"+id+"'")) t.classList.add('on');
-  });
-  if(id==='admin') renderAdminTbl();
-  if(id==='staff') renderStaffCal();
-}
-
-function showSetPanel(id){
-  document.querySelectorAll('.set-panel').forEach(p=>p.classList.remove('on'));
-  document.querySelectorAll('.set-nav-btn').forEach(b=>b.classList.remove('on'));
-  const panel=document.getElementById('sp-'+id);
-  if(panel) panel.classList.add('on');
-  document.querySelectorAll('.set-nav-btn').forEach(b=>{
-    if(b.getAttribute('onclick')&&b.getAttribute('onclick').includes("'"+id+"'")) b.classList.add('on');
-  });
-  if(id==='nenkyu') renderNenkyuPanel();
-  if(id==='tocho') renderTochoCal();
-  if(id==='shifts') renderShiftList();
-}
-
-function changeMonth(delta){
-  month+=delta;
-  if(month>12){month=1;year++;}
-  if(month<1){month=12;year--;}
-  if(!tochoDays[month]) tochoDays[month]=new Set();
-  ensureSchedule(month);
-  document.getElementById('month-label').textContent=year+'年 '+month+'月';
-  rebuildStaffSelect();
-  renderStaffCal();renderSummary();renderYkCard();renderICS();
-  renderAdminTbl();renderTochoCal();renderNenkyuPanel();
-  const lbl=document.getElementById('tc-month-label');
-  if(lbl) lbl.textContent=year+'年'+month+'月';
-  saveAll();
-}
-
-function editTitle(){
-  const t=prompt('科名を入力してください',cfg.title);
-  if(t===null) return;
-  cfg.title=t.trim()||cfg.title;
-  const lt=document.getElementById('logo-text');
-  if(lt) lt.innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
-  saveAll();
-}
-
-function saveCfg(){
-  const ct=document.getElementById('cfg-title');if(ct) cfg.title=ct.value.trim()||cfg.title;
-  const ca=document.getElementById('cfg-auto-ake');if(ca) cfg.autoAke=ca.checked;
-  const cw=document.getElementById('cfg-wish-limit');if(cw) cfg.wishLimit=parseInt(cw.value)||6;
-  const cd=document.getElementById('cfg-wish-day-limit');if(cd) cfg.wishDayLimit=parseInt(cd.value)||2;
-  const lt=document.getElementById('logo-text');
-  if(lt) lt.innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
-  saveAll();
-}
-
-/* ══ STAFF SELECT / MODE ══ */
+/* ══ STAFF SELECT ══ */
 function rebuildStaffSelect(){
-  const sel=document.getElementById('stf-sel');
-  if(!sel) return;
-  const prev=sel.value||currentStaff;
-  sel.innerHTML='';
-  STAFF.forEach(n=>{
-    const o=document.createElement('option');
-    o.value=n;o.textContent=n;
-    sel.appendChild(o);
-  });
-  sel.value=STAFF.includes(prev)?prev:(STAFF[0]||'');
-  currentStaff=sel.value;
+  const sel=document.getElementById('stf-sel');sel.innerHTML='';
+  STAFF.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});
+  // すでに選択中のスタッフがSTAFFリストに存在すれば維持、なければ先頭に
+  if(currentStaff && STAFF.includes(currentStaff)){sel.value=currentStaff;}
+  else{currentStaff=STAFF[0]||'';sel.value=currentStaff;}
 }
-
-function onStaffChange(){
-  const sel=document.getElementById('stf-sel');
-  if(sel) currentStaff=sel.value;
-  selectedDay=null;
-  renderStaffCal();renderSummary();renderYkCard();
-}
-
-function setMode(mode){
-  currentMode=mode;
-  selectedDay=null;
-  kibouSelected=null;
-  document.querySelectorAll('.mpill').forEach(p=>p.classList.remove('on'));
-  const btn=document.querySelector('.mpill.'+mode);
-  if(btn) btn.classList.add('on');
-  renderStaffCal();
-  const kp=document.getElementById('kibou-panel');
-  if(kp) kp.style.display=(mode==='kibou')?'block':'none';
+function onStaffChange(){currentStaff=document.getElementById('stf-sel').value;selectedDay=null;kibouSelected=null;hideDetail();renderStaffCal();renderSummary();renderYkCard();}
+function setMode(m){
+  currentMode=m;
+  document.getElementById('pill-wish').classList.toggle('on',m==='wish');
+  document.getElementById('pill-limit').classList.toggle('on',m==='limit');
+  document.getElementById('pill-kibou').classList.toggle('on',m==='kibou');
+  const hints={wish:'タップで希望休を登録',limit:'日付をタップ → できない勤務を選択',kibou:'日付をタップ → 希望する勤務を選択'};
+  document.getElementById('mode-hint').textContent=hints[m];
+  if(m==='wish'){selectedDay=null;kibouSelected=null;hideDetail();renderStaffCal();}
 }
 
 /* ══ STAFF CALENDAR ══ */
 function renderStaffCal(){
-  const grid=document.getElementById('cal-grid');
-  if(!grid||!currentStaff) return;
-  ensureDay(currentStaff,month,1); // ensure month exists
-  const days=daysInMonth(year,month);
-  const fd=firstDow(year,month);
+  const leg=document.getElementById('stf-cal-legend');
+  leg.innerHTML=`
+    <span class="leg" style="background:var(--s-wish);color:var(--f-wish)">● 希望休</span>
+    <span class="leg" style="background:var(--s-limit);color:var(--f-limit)">▲ 勤務条件</span>
+    <span class="leg" style="background:var(--s-kibou);color:var(--f-kibou)">★ 希望勤務</span>
+    <span class="leg" style="background:#dbeafe;color:#1e40af">土</span>
+    <span class="leg" style="background:#fee2e2;color:#991b1b">日・祝</span>`;
+  document.getElementById('sum-month').textContent=`${month}月`;
+  const grid=document.getElementById('stf-cal');grid.innerHTML='';
+  const fd=firstDow(year,month),days=daysInMonth(year,month);
   const hols=getHolidays(year,month);
-  const sd=staffData[currentStaff]||{};
-  const md=sd[month]||{};
-  const legend=document.getElementById('cal-legend');
-  if(legend){
-    legend.innerHTML=SHIFTS.filter(s=>s.visible).map(s=>
-      `<span class="leg" style="background:${s.bg};color:${s.fg}">${s.l}</span>`
-    ).join('');
-  }
-  // DOW header
-  const dowEl=document.getElementById('cal-dow');
-  if(dowEl) dowEl.innerHTML=DOW.map((d,i)=>`<div style="${i===0?'color:#991b1b':i===6?'color:#1e40af':''}">${d}</div>`).join('');
-
-  grid.innerHTML='';
-  // empty cells
-  for(let i=0;i<fd;i++){
-    const el=document.createElement('div');
-    el.className='cal-cell empty';
-    grid.appendChild(el);
-  }
+  for(let i=0;i<fd;i++){const e=document.createElement('div');e.className='cal-cell empty';grid.appendChild(e);}
   for(let d=1;d<=days;d++){
-    const dd=md[d]||{wish:false,limit:false,ng:new Set(),comment:'',kibou:null};
-    const dow=getDow(year,month,d);
-    const isH=hols.has(d);
-    let cls='cal-cell ';
-    if(isH) cls+='hol';
-    else if(dow===0) cls+='sun';
-    else if(dow===6) cls+='sat';
-    else cls+='normal';
-    if(dd.wish) cls+=' wish';
-    if(dd.limit) cls+=' limit';
-    if(dd.kibou) cls+=' kibou';
-    if(selectedDay===d) cls+=' selected';
-    const el=document.createElement('div');
-    el.className=cls;
-    const sched=schedData[month]&&schedData[month][currentStaff];
-    const shiftKey=sched?sched[d-1]:null;
-    const shift=shiftKey?shiftByKey(shiftKey):null;
-    el.innerHTML=`<span>${d}</span><span style="font-size:9px;margin-top:1px;color:${shift?shift.fg:'inherit'}">${shift?shift.l:''}</span>`;
-    if(dd.comment) el.innerHTML+=`<span class="dot">💬</span>`;
-    el.onclick=()=>onDayClick(d);
-    grid.appendChild(el);
+    const dd=staffData[currentStaff]?.[month]?.[d]||{};
+    const cell=document.createElement('div');
+    let base=cellCls(year,month,d); // returns 'hol','sun','sat','normal'
+    let cls='cal-cell '+base;
+    const hasWish=dd.wish,hasLimit=dd.limit,hasKibou=!!dd.kibou;
+    if(hasWish&&hasKibou)cls+=' wish kibou';
+    else if(hasWish)cls+=' wish';
+    else if(hasKibou)cls+=' kibou';
+    else if(hasLimit)cls+=' limit';
+    if(d===selectedDay)cls+=' selected';
+    if(isTochoDay(month,d))cls+=' tocho-day';
+    cell.className=cls;
+    let txt=String(d);
+    if(hasWish)txt+='<span class="dot">●</span>';
+    if(hasKibou)txt+='<span class="dot" style="color:#166534">★'+(shiftByKey(dd.kibou).l)+'</span>';
+    else if(hasLimit&&!hasWish&&!hasKibou)txt+='<span class="dot">▲</span>';
+    cell.innerHTML=txt;
+    cell.onclick=()=>tapDay(d);
+    grid.appendChild(cell);
   }
-  renderSidePanel();
 }
 
-function onDayClick(d){
+function tapDay(d){
+  if(!STAFF.length)return;
   ensureDay(currentStaff,month,d);
   const dd=staffData[currentStaff][month][d];
+
   if(currentMode==='wish'){
     dd.wish=!dd.wish;
-    if(dd.wish&&dd.limit) dd.limit=false;
-  } else if(currentMode==='limit'){
-    dd.limit=!dd.limit;
-    if(dd.limit&&dd.wish) dd.wish=false;
-  } else if(currentMode==='kibou'){
-    selectedDay=(selectedDay===d)?null:d;
-    renderStaffCal();renderSidePanel();
-    return;
-  } else if(currentMode==='comment'){
-    selectedDay=d;
-    renderStaffCal();renderSidePanel();
-    return;
+    // 希望休を管理者画面に即時反映
+    ensureSchedule(month);
+    if(dd.wish){
+      schedData[month][currentStaff][d-1]='shukyu';
+      // 警告チェック（平日のみ）
+      checkWishWarnings(currentStaff,month);
+    } else {
+      // 解除時は日勤に戻す（土日祝は週休のまま）
+      if(!isSat(year,month,d)&&!isSun(year,month,d)&&!isHol(year,month,d)){
+        schedData[month][currentStaff][d-1]='nikkn';
+      }
+    }
+    if(!dd.wish&&!dd.limit&&!dd.ng.size&&!dd.comment&&!dd.kibou)delete staffData[currentStaff][month][d];
+    saveAll();renderStaffCal();renderSummary();return;
   }
-  renderStaffCal();renderSummary();
-  saveAll();
+
+  if(currentMode==='kibou'){
+    selectedDay=d;kibouSelected=dd.kibou||null;
+    renderStaffCal();showDetailKibou(d,dd);return;
+  }
+
+  if(!dd.limit)dd.limit=true;
+  selectedDay=d;renderStaffCal();showDetailLimit(d,dd);
 }
 
-function saveKibou(){
-  if(selectedDay===null||!currentStaff) return;
-  ensureDay(currentStaff,month,selectedDay);
-  const dd=staffData[currentStaff][month][selectedDay];
-  dd.kibou=kibouSelected;
-  selectedDay=null;kibouSelected=null;
-  renderStaffCal();renderSummary();
-  saveAll();
+function checkWishWarnings(name,m){
+  const mData=staffData[name]?.[m]||{};
+  const wishDays=Object.entries(mData).filter(([,v])=>v.wish);
+  const limit=cfg.wishLimit||6;
+  const hols=getHolidays(year,m);
+  const weekdayWish=wishDays.filter(([d])=>!isSat(year,m,+d)&&!isSun(year,m,+d)&&!hols.has(+d));
+  if(weekdayWish.length>limit){
+    alert(`⚠ ${name} の希望休が月間上限（${limit}日）を超えています（現在${weekdayWish.length}日）`);
+  }
+  // 当直日との重複チェック
+  const tochoConflict=wishDays.filter(([d])=>isTochoDay(m,+d));
+  if(tochoConflict.length){
+    alert(`⚠ ${tochoConflict.map(([d])=>d+'日').join('・')} は当直日と重なっています`);
+  }
+  // 1日あたり人数上限チェック（平日のみ）
+  const dayLimit=cfg.wishDayLimit||2;
+  wishDays.forEach(([d])=>{
+    if(isSat(year,m,+d)||isSun(year,m,+d)||hols.has(+d))return;
+    const cnt=STAFF.filter(n=>{return staffData[n]?.[m]?.[+d]?.wish;}).length;
+    if(cnt>dayLimit){
+      alert(`⚠ ${m}月${d}日 の希望休が1日あたりの上限（${dayLimit}名）を超えています（現在${cnt}名）`);
+    }
+  });
+}
+
+function showDetailLimit(d,dd){
+  const w=getDow(year,month,d);
+  document.getElementById('detail-title').textContent=`${month}月${d}日（${DOW[w]}）の勤務条件`;
+  document.getElementById('detail-empty').style.display='none';
+  document.getElementById('detail-body').style.display='block';
+  document.getElementById('db-wish').style.display='none';
+  document.getElementById('db-limit').style.display='block';
+  document.getElementById('db-kibou').style.display='none';
+  document.getElementById('comment-inp').value=dd.comment||'';
+  const btns=document.getElementById('ng-btns');btns.innerHTML='';
+  SHIFTS.filter(s=>s.visible&&!['empty','shukyu','nenkyu','ampms','ampmn'].includes(s.k)).forEach(s=>{
+    const btn=document.createElement('button');
+    btn.className='ng-btn '+(dd.ng.has(s.k)?'ng':'ok');
+    btn.style.background=s.bg;btn.style.color=s.fg;
+    btn.textContent=(dd.ng.has(s.k)?'✕ ':'')+s.l;
+    btn.onclick=()=>{if(dd.ng.has(s.k))dd.ng.delete(s.k);else dd.ng.add(s.k);showDetailLimit(d,dd);};
+    btns.appendChild(btn);
+  });
+}
+
+function showDetailKibou(d,dd){
+  const w=getDow(year,month,d);
+  document.getElementById('detail-title').textContent=`${month}月${d}日（${DOW[w]}）の希望勤務`;
+  document.getElementById('detail-empty').style.display='none';
+  document.getElementById('detail-body').style.display='block';
+  document.getElementById('db-wish').style.display='none';
+  document.getElementById('db-limit').style.display='none';
+  document.getElementById('db-kibou').style.display='block';
+  const btns=document.getElementById('kibou-btns');btns.innerHTML='';
+  SHIFTS.filter(s=>s.visible&&s.k!=='empty').forEach(s=>{
+    const btn=document.createElement('button');
+    btn.className='kibou-sh'+(kibouSelected===s.k?' selected':'');
+    btn.style.background=s.bg;btn.style.color=s.fg;
+    btn.textContent=s.l;
+    btn.onclick=()=>{kibouSelected=(kibouSelected===s.k)?null:s.k;showDetailKibou(d,dd);};
+    btns.appendChild(btn);
+  });
+}
+
+function hideDetail(){
+  document.getElementById('detail-title').textContent='日付を選択してください';
+  document.getElementById('detail-empty').style.display='';
+  document.getElementById('detail-body').style.display='none';
 }
 
 function saveCondition(){
-  if(selectedDay===null||!currentStaff) return;
+  if(!selectedDay)return;
   ensureDay(currentStaff,month,selectedDay);
   const dd=staffData[currentStaff][month][selectedDay];
-  // NGシフト取得
-  const ngBtns=document.querySelectorAll('.ng-btn');
-  dd.ng=new Set();
-  ngBtns.forEach(b=>{ if(b.classList.contains('ng')) dd.ng.add(b.dataset.key); });
-  const cmtEl=document.getElementById('day-comment');
-  if(cmtEl) dd.comment=cmtEl.value.trim();
-  selectedDay=null;
-  renderStaffCal();renderSummary();
-  saveAll();
+  dd.comment=document.getElementById('comment-inp').value.trim();
+  if(!dd.ng.size&&!dd.comment)dd.limit=false;
+  if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][month][selectedDay];
+  selectedDay=null;hideDetail();saveAll();renderStaffCal();renderSummary();
 }
 
-/* ══ SIDE PANEL ══ */
-function renderSidePanel(){
-  const panel=document.getElementById('side-panel');
-  if(!panel) return;
-  if(selectedDay===null||!currentStaff){
-    panel.innerHTML='<div class="side-empty">日付をタップして<br>条件を入力</div>';
-    return;
-  }
+function saveKibou(){
+  if(!selectedDay)return;
   ensureDay(currentStaff,month,selectedDay);
   const dd=staffData[currentStaff][month][selectedDay];
-  const dow=DOW[getDow(year,month,selectedDay)];
-  if(currentMode==='kibou'){
-    const shifts=SHIFTS.filter(s=>s.visible);
-    panel.innerHTML=`<div style="font-size:12px;font-weight:700;margin-bottom:8px">${selectedDay}日(${dow}) 希望勤務</div>
-    <div class="kibou-shifts">${shifts.map(s=>`<button class="kibou-sh${kibouSelected===s.k?' selected':''}" style="background:${s.bg};color:${s.fg}" onclick="kibouSelected='${s.k}';renderSidePanel()">${s.l}</button>`).join('')}</div>
-    <button class="save-btn" onclick="saveKibou()">保存</button>`;
+  dd.kibou=kibouSelected;
+  // 管理者カレンダーに直接反映
+  ensureSchedule(month);
+  if(kibouSelected){
+    schedData[month][currentStaff][selectedDay-1]=kibouSelected;
+    // 当直 → 翌日を明けに自動セット（設定がONの場合）
+    if(kibouSelected==='tocho'&&cfg.autoAke!==false){
+      const totalDays=daysInMonth(year,month);
+      if(selectedDay<totalDays){
+        schedData[month][currentStaff][selectedDay]='ake';
+      } else {
+        const nm=month===12?1:month+1;
+        ensureSchedule(nm);
+        if(schedData[nm][currentStaff])schedData[nm][currentStaff][0]='ake';
+      }
+    }
   } else {
-    const ngShifts=SHIFTS.filter(s=>s.visible);
-    panel.innerHTML=`<div style="font-size:12px;font-weight:700;margin-bottom:8px">${selectedDay}日(${dow}) 条件設定</div>
-    <div style="font-size:11px;color:var(--text2);margin-bottom:4px">NGシフト（不可）</div>
-    <div class="ng-toggle">${ngShifts.map(s=>`<button class="ng-btn ${dd.ng&&dd.ng.has(s.k)?'ng':'ok'}" data-key="${s.k}" style="background:${s.bg};color:${s.fg}" onclick="this.classList.toggle('ng');this.classList.toggle('ok')">${s.l}</button>`).join('')}</div>
-    <div style="font-size:11px;color:var(--text2);margin-bottom:4px">メモ</div>
-    <textarea id="day-comment" style="width:100%;height:60px;font-size:12px;padding:6px;border:1px solid var(--border2);border-radius:var(--rs);font-family:inherit;resize:none">${dd.comment||''}</textarea>
-    <button class="save-btn" onclick="saveCondition()">保存</button>`;
+    // 解除時：希望休なら週休、土日祝なら週休、それ以外は日勤
+    const d=selectedDay;
+    if(dd.wish){schedData[month][currentStaff][d-1]='shukyu';}
+    else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){schedData[month][currentStaff][d-1]='shukyu';}
+    else{schedData[month][currentStaff][d-1]='nikkn';}
   }
+  if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][month][selectedDay];
+  selectedDay=null;kibouSelected=null;hideDetail();saveAll();renderStaffCal();renderSummary();
 }
 
-/* ══ SUMMARY ══ */
 function renderSummary(){
-  const list=document.getElementById('sum-list');
-  if(!list||!currentStaff) return;
-  const sd=staffData[currentStaff]||{};
-  const md=sd[month]||{};
-  const items=[];
-  const days=daysInMonth(year,month);
-  for(let d=1;d<=days;d++){
-    const dd=md[d];
-    if(!dd) continue;
-    if(dd.wish||dd.limit||dd.kibou||(dd.ng&&dd.ng.size>0)||dd.comment){
-      items.push({d,dd});
+  const list=document.getElementById('sum-list');list.innerHTML='';
+  const mData=staffData[currentStaff]?.[month]||{};
+  const entries=Object.entries(mData).filter(([,v])=>v.wish||v.limit||v.kibou).sort(([a],[b])=>+a-+b);
+  if(!entries.length){list.innerHTML='<div class="side-empty">まだ登録がありません</div>';return;}
+  entries.forEach(([d,v])=>{
+    const dow=DOW[getDow(year,month,+d)];
+    const ngText=v.limit&&v.ng.size?[...v.ng].map(k=>shiftByKey(k).l).join('・')+'不可':'';
+    const item=document.createElement('div');item.className='sum-item';
+    item.innerHTML=`
+      <span class="sum-date">${d}日(${dow})</span>
+      <div class="sum-tags">
+        ${v.wish?`<span class="sum-type" style="background:var(--s-wish);color:var(--f-wish)">希望休</span>`:''}
+        ${v.kibou?`<span class="sum-type" style="background:var(--s-kibou);color:var(--f-kibou)">★ ${shiftByKey(v.kibou).l}</span>`:''}
+        ${v.limit?`<span class="sum-type" style="background:var(--s-limit);color:var(--f-limit)">条件${ngText?': '+ngText:''}</span>`:''}
+        ${v.comment?`<div class="sum-comment">${v.comment}</div>`:''}
+      </div>
+      <span class="sum-del" onclick="deleteEntry(${d})">×</span>`;
+    list.appendChild(item);
+  });
+}
+
+function deleteEntry(d){
+  const hadKibou=staffData[currentStaff]?.[month]?.[d]?.kibou;
+  if(staffData[currentStaff]?.[month])delete staffData[currentStaff][month][d];
+  // 希望休・希望勤務が削除されたら管理者画面も戻す
+  if(schedData[month]&&schedData[month][currentStaff]){
+    if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){
+      schedData[month][currentStaff][d-1]='shukyu';
+    } else {
+      schedData[month][currentStaff][d-1]='nikkn';
     }
   }
-  if(items.length===0){list.innerHTML='<div style="font-size:12px;color:var(--text3);text-align:center;padding:12px">入力なし</div>';return;}
-  list.innerHTML=items.map(({d,dd})=>{
-    const dow=DOW[getDow(year,month,d)];
-    const tags=[];
-    if(dd.wish) tags.push(`<span class="sum-type" style="background:var(--s-wish);color:var(--f-wish)">希望休</span>`);
-    if(dd.limit) tags.push(`<span class="sum-type" style="background:var(--s-limit);color:var(--f-limit)">条件</span>`);
-    if(dd.kibou){const s=shiftByKey(dd.kibou);tags.push(`<span class="sum-type" style="background:${s.bg};color:${s.fg}">希望:${s.l}</span>`);}
-    if(dd.ng&&dd.ng.size>0) tags.push(`<span class="sum-type" style="background:#fee2e2;color:#991b1b">NG:${[...dd.ng].map(k=>shiftByKey(k).l).join(',')}</span>`);
-    return `<div class="sum-item">
-      <div class="sum-date">${d}日(${dow})</div>
-      <div class="sum-tags">${tags.join('')}${dd.comment?`<div class="sum-comment">${dd.comment}</div>`:''}</div>
-      <div class="sum-del" onclick="clearDay(${d})">×</div>
-    </div>`;
-  }).join('');
-}
-
-function clearDay(d){
-  if(!currentStaff) return;
-  if(staffData[currentStaff]&&staffData[currentStaff][month])
-    delete staffData[currentStaff][month][d];
-  renderStaffCal();renderSummary();saveAll();
+  if(selectedDay===+d){selectedDay=null;kibouSelected=null;hideDetail();}
+  saveAll();renderStaffCal();renderSummary();
 }
 
 /* ══ NENKYU CARD ══ */
+function calcNenkyu(name){
+  const nd=nenkyuData[name]||{grant:0,carry:0};
+  let consumed=0;
+  for(let mo=1;mo<=12;mo++){
+    const sched=schedData[mo]?.[name];if(!sched)continue;
+    sched.forEach(k=>{if(k==='nenkyu')consumed+=1;if(k==='ampmn')consumed+=0.5;});
+  }
+  const total=(nd.grant||0)+(nd.carry||0);
+  const carryUsed=Math.min(consumed,nd.carry||0);
+  const grantUsed=Math.max(0,consumed-(nd.carry||0));
+  return{grant:nd.grant||0,carry:nd.carry||0,total,consumed,carryUsed,grantUsed,
+    carryRem:Math.max(0,(nd.carry||0)-carryUsed),grantRem:Math.max(0,(nd.grant||0)-grantUsed),
+    remain:Math.max(0,(nd.carry||0)-carryUsed)+Math.max(0,(nd.grant||0)-grantUsed)};
+}
 function renderYkCard(){
-  const card=document.getElementById('yk-card');
-  if(!card||!currentStaff) return;
-  const yd=nenkyuData[currentStaff]||{grant:0,carry:0};
-  const sched=schedData[month]&&schedData[month][currentStaff]||[];
-  let used=0;
-  sched.forEach(k=>{const s=shiftByKey(k);if(s&&s.group==='有給')used+=s.count;});
-  const total=(yd.grant||0)+(yd.carry||0);
-  const remain=total-used;
-  const carryPct=total>0?Math.round((yd.carry||0)/total*100):0;
-  const usedPct=total>0?Math.round(used/total*100):0;
-  card.querySelector('.yk-grid').innerHTML=`
-    <div class="yk-item"><div class="yk-label">本年度付与</div><div class="yk-val">${yd.grant||0}</div><div class="yk-sub">日</div></div>
-    <div class="yk-item"><div class="yk-label">前年度繰越</div><div class="yk-val">${yd.carry||0}</div><div class="yk-sub">日</div></div>`;
-  const tot=card.querySelector('.yk-total');
-  if(tot) tot.innerHTML=`<div class="yk-label">今年度残日数</div><div class="yk-val">${remain}</div><div class="yk-sub">消化 ${used} 日 ／ 合計 ${total} 日</div>`;
-  const bt=card.querySelector('.bar-track');
-  if(bt) bt.innerHTML=`<div class="bar-carry" style="width:${carryPct}%"></div><div class="bar-curr" style="width:${usedPct}%"></div>`;
+  const fy=getNenkyuFiscalYear();
+  document.getElementById('yk-year').textContent=fy;
+  const nk=calcNenkyu(currentStaff);
+  document.getElementById('yk-carry').textContent=nk.carry+'日';
+  document.getElementById('yk-carry-sub').textContent=`残${nk.carryRem}日（消化${nk.carryUsed}日）`;
+  document.getElementById('yk-grant').textContent=nk.grant+'日';
+  document.getElementById('yk-grant-sub').textContent=`残${nk.grantRem}日（消化${nk.grantUsed}日）`;
+  document.getElementById('yk-consumed').textContent=nk.consumed+'日';
+  document.getElementById('yk-consumed-sub').textContent=`繰越${nk.carryUsed}日 + 本年度${nk.grantUsed}日`;
+  document.getElementById('yk-total').textContent=nk.remain+'日';
+  document.getElementById('yk-total-sub').textContent=`繰越消化残${nk.carryRem}日 + 本年度消化残${nk.grantRem}日`;
+  const remTxt=nk.remain>=0?`残${nk.remain}日`:`超過${Math.abs(nk.remain)}日`;
+  const remEl=document.getElementById('yk-remain');
+  remEl.textContent=remTxt;remEl.style.color=nk.remain<0?'#991b1b':nk.remain<=5?'#92400e':'#27500A';
+  const pct=nk.total>0?100/nk.total:0;
+  document.getElementById('bar-carry').style.width=Math.min(nk.carryUsed*pct,100)+'%';
+  document.getElementById('bar-curr').style.width=Math.min(nk.grantUsed*pct,100)+'%';
 }
 
 /* ══ ICS ══ */
 function renderICS(){
-  const mc=document.getElementById('ics-months');
-  const sc=document.getElementById('ics-shifts');
-  if(!mc||!sc) return;
-  const months=[month-1,month,month+1].map(m=>{
-    let y2=year,m2=m;
-    if(m2<1){m2+=12;y2--;}if(m2>12){m2-=12;y2++;}
-    return {y:y2,m:m2,label:y2+'年'+m2+'月'};
+  const el=document.getElementById('ics-months');el.innerHTML='';
+  for(let m=1;m<=12;m++){
+    const chip=document.createElement('span');chip.className='ics-chip'+(icsSelMonths.has(m)?' on':'');
+    chip.textContent=m+'月';chip.onclick=()=>{if(icsSelMonths.has(m))icsSelMonths.delete(m);else icsSelMonths.add(m);renderICS();};
+    el.appendChild(chip);
+  }
+  const sel=document.getElementById('ics-shifts');sel.innerHTML='';
+  SHIFTS.filter(s=>s.visible&&s.k!=='empty').forEach(s=>{
+    const btn=document.createElement('span');btn.className='ics-sh-btn'+(icsSelShifts.has(s.k)?' on':' off');
+    btn.style.background=s.bg;btn.style.color=s.fg;btn.textContent=s.l;
+    btn.onclick=()=>{if(icsSelShifts.has(s.k))icsSelShifts.delete(s.k);else icsSelShifts.add(s.k);renderICS();};
+    sel.appendChild(btn);
   });
-  mc.innerHTML=months.map(({y,m,label})=>
-    `<div class="ics-chip${icsSelMonths.has(m)?' on':''}" onclick="toggleIcsMonth(${m})">${label}</div>`
-  ).join('');
-  sc.innerHTML=SHIFTS.filter(s=>s.visible).map(s=>
-    `<button class="ics-sh-btn${icsSelShifts.has(s.k)?' on':' off'}" style="background:${s.bg};color:${s.fg}" onclick="toggleIcsShift('${s.k}')">${s.l}</button>`
-  ).join('');
-}
-
-function toggleIcsMonth(m){
-  if(icsSelMonths.has(m)) icsSelMonths.delete(m); else icsSelMonths.add(m);
-  renderICS();
-}
-function toggleIcsShift(k){
-  if(icsSelShifts.has(k)) icsSelShifts.delete(k); else icsSelShifts.add(k);
-  renderICS();
 }
 function downloadICS(){
-  if(!currentStaff){alert('スタッフを選択してください');return;}
-  const lines=['BEGIN:VCALENDAR','VERSION:2.0','CALSCALE:GREGORIAN','PRODID:-//kinmuhyo//JP'];
-  icsSelMonths.forEach(m=>{
-    let y2=year,m2=m;
-    if(m2<1){m2+=12;y2--;}if(m2>12){m2-=12;y2++;}
-    const sched=schedData[m2]&&schedData[m2][currentStaff]||[];
-    const days=daysInMonth(y2,m2);
+  if(!icsSelMonths.size){alert('取り込む月を選択してください');return;}
+  if(!icsSelShifts.size){alert('取り込む勤務種別を選択してください');return;}
+  let ics='BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//'+cfg.title+' 勤務表//\r\nCALSCALE:GREGORIAN\r\n';
+  [...icsSelMonths].sort((a,b)=>a-b).forEach(m=>{
+    const sched=schedData[m]?.[currentStaff];if(!sched)return;
+    const days=daysInMonth(year,m);
     for(let d=1;d<=days;d++){
-      const k=sched[d-1];
-      if(!k||!icsSelShifts.has(k)) continue;
-      const s=shiftByKey(k);
-      const dt=`${y2}${String(m2).padStart(2,'0')}${String(d).padStart(2,'0')}`;
-      lines.push('BEGIN:VEVENT',`DTSTART;VALUE=DATE:${dt}`,`DTEND;VALUE=DATE:${dt}`,
-        `SUMMARY:${s.l}`,`UID:kinmuhyo-${dt}-${k}@kinmuhyo`,'END:VEVENT');
+      const k=sched[d-1];if(!icsSelShifts.has(k))continue;
+      const sh=shiftByKey(k);
+      const dt=`${year}${String(m).padStart(2,'0')}${String(d).padStart(2,'0')}`;
+      const dtEnd=new Date(year,m-1,d+1);
+      const dtEndStr=`${dtEnd.getFullYear()}${String(dtEnd.getMonth()+1).padStart(2,'0')}${String(dtEnd.getDate()).padStart(2,'0')}`;
+      ics+=`BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:${dt}\r\nDTEND;VALUE=DATE:${dtEndStr}\r\nSUMMARY:${cfg.title}\u3000${sh.l}\r\nUID:${dt}-${k}@kinmuhyo\r\nEND:VEVENT\r\n`;
     }
   });
-  lines.push('END:VCALENDAR');
-  const blob=new Blob([lines.join('\r\n')],{type:'text/calendar'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download=`kinmuhyo_${currentStaff}.ics`;a.click();
+  ics+='END:VCALENDAR';
+  const blob=new Blob([ics],{type:'text/calendar;charset=utf-8'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${currentStaff.split(' ')[0]}.ics`;a.click();
 }
 
-/* ══ ADMIN TABLE ══ */
-function renderAdminTbl(){
-  const thead=document.getElementById('admin-thead');
-  const tbody=document.getElementById('admin-tbody');
-  const tfoot=document.getElementById('admin-tfoot');
-  const alertBar=document.getElementById('alert-bar');
-  const legend=document.getElementById('admin-legend');
-  if(!thead||!tbody) return;
+/* ══ ADMIN ══ */
+function renderAdmin(){
   ensureSchedule(month);
   const days=daysInMonth(year,month);
   const hols=getHolidays(year,month);
+  const legEl=document.getElementById('admin-legend');legEl.innerHTML='';
+  SHIFTS.filter(s=>s.visible).forEach(s=>{
+    const span=document.createElement('span');span.className='leg';span.style.background=s.bg;span.style.color=s.fg;span.textContent=s.l;legEl.appendChild(span);
+  });
+  ['<span class="leg" style="background:var(--s-wish);color:var(--f-wish)">●希望休</span>',
+   '<span class="leg" style="background:var(--s-kibou);color:var(--f-kibou)">★希望勤務</span>',
+   '<span class="leg" style="background:var(--s-limit);color:var(--f-limit)">▲条件</span>',
+   '<span class="leg" style="outline:2px solid #dc2626;background:#fee2e2;color:#991b1b">⚠違反</span>',
+  ].forEach(h=>legEl.insertAdjacentHTML('beforeend',h));
 
-  // legend
-  if(legend) legend.innerHTML=SHIFTS.filter(s=>s.visible).map(s=>`<span class="leg" style="background:${s.bg};color:${s.fg}">${s.l}</span>`).join('')+
-    `<span class="leg" style="background:var(--s-wish);color:var(--f-wish)">●希望休</span>
-     <span class="leg" style="background:var(--s-kibou);color:var(--f-kibou)">★希望勤務</span>
-     <span class="leg" style="background:var(--s-limit);color:var(--f-limit)">▲条件</span>
-     <span class="leg" style="outline:2px solid #dc2626;background:#fee2e2;color:#991b1b">⚠違反</span>`;
-
-  // GROUPS集計ヘッダ
-  const grpCols=GROUPS.map(g=>g.name);
-
-  // thead
-  let thHtml='<tr><th class="th-name">氏名</th>';
+  const thead=document.getElementById('admin-thead');thead.innerHTML='';
+  const tr=document.createElement('tr');
+  const thN=document.createElement('th');thN.className='th-name';thN.textContent='氏名';tr.appendChild(thN);
   for(let d=1;d<=days;d++){
-    const dow=getDow(year,month,d);
-    const isH=hols.has(d);
-    const isTD=isTochoDay(month,d);
-    let cls='th-day';
-    if(isTD) cls+=' th-tocho';
-    else if(isH) cls+=' th-hol';
-    else if(dow===0) cls+=' th-sun';
-    else if(dow===6) cls+=' th-sat';
-    thHtml+=`<th class="${cls}">${d}<br><span style="font-size:9px">${DOW[dow]}</span>${isTD?'<br><span style="font-size:7px">当</span>':''}${isH?'<br><span style="font-size:7px">祝</span>':''}</th>`;
+    const isHolDay=hols.has(d);const isTD=isTochoDay(month,d);const th=document.createElement('th');
+    th.className='th-day'+(isSat(year,month,d)?' th-sat':isSun(year,month,d)?' th-sun':isHolDay?' th-hol':'')+(isTD?' th-tocho':'');
+    th.innerHTML=`${d}<br><span style="font-size:9px">${DOW[getDow(year,month,d)]}</span>${isHolDay?'<br><span style="font-size:7px">祝</span>':''}${isTD?'<br><span style="font-size:7px">当</span>':''}`;
+    tr.appendChild(th);
   }
-  grpCols.forEach(g=>{ thHtml+=`<th class="th-sum">${g}計</th>`; });
-  thHtml+='<th class="th-sum">有給残</th></tr>';
-  thead.innerHTML=thHtml;
+  GROUPS.forEach(g=>{
+    const th=document.createElement('th');th.className='th-sum';th.textContent=g.name+'計';tr.appendChild(th);
+    if(g.special==='nenkyu'){const th2=document.createElement('th');th2.className='th-sum';th2.textContent='有給残';tr.appendChild(th2);}
+  });
+  thead.appendChild(tr);
 
-  // 統計収集
-  const tochoCount=new Array(days+1).fill(0);
-  const taikiByDay={};
-  let totalWish=0,totalKibou=0,totalConflict=0,totalTocho=0;
-  const alerts=[];
-
-  // tbody
-  let tbHtml='';
+  const tbody=document.getElementById('admin-tbody');tbody.innerHTML='';
+  const conflicts=[];
   STAFF.forEach(name=>{
-    const sched=schedData[month][name]||[];
-    const sd=(staffData[name]||{})[month]||{};
-    const grpTotals={};
-    GROUPS.forEach(g=>{grpTotals[g.name]=0;});
-    let rowHtml=`<tr><td class="td-name">${name.split(' ')[0]||name}</td>`;
+    const row=document.createElement('tr');
+    const tdN=document.createElement('td');tdN.className='td-name';tdN.textContent=name.split(' ')[0];row.appendChild(tdN);
+    const grpSums={};GROUPS.forEach(g=>{grpSums[g.name]=0;});
     for(let d=1;d<=days;d++){
-      const k=sched[d-1]||'nikkn';
-      const s=shiftByKey(k);
-      const dd=sd[d]||{};
-      let cellCls='cell';
-      // conflict check
-      let conflict=false;
-      if(dd.wish&&s.group!=='週休'&&s.group!=='有給') conflict=true;
-      if(dd.ng&&dd.ng.has&&dd.ng.has(k)) conflict=true;
-      if(conflict){cellCls+=' conflict';totalConflict++;}
-      if(dd.wish) cellCls+=' wish-mark';
-      if(dd.limit) cellCls+=' limit-mark';
-      if(dd.kibou) cellCls+=' kibou-mark';
-      rowHtml+=`<td class="${cellCls}" style="background:${s.bg};color:${s.fg}" onclick="openPicker('${name}',${d})">${s.l}</td>`;
-      // 集計
-      if(grpTotals[s.group]!==undefined) grpTotals[s.group]+=s.count;
-      if(s.k==='tocho') tochoCount[d]++;
-      if(s.k==='taiki'){
-        if(!taikiByDay[d]) taikiByDay[d]=[];
-        taikiByDay[d].push(name);
-      }
-      if(dd.wish) totalWish++;
-      if(dd.kibou) totalKibou++;
+      const k=(schedData[month][name]&&schedData[month][name][d-1])||'empty';
+      const sh=shiftByKey(k);
+      const dd=staffData[name]?.[month]?.[d]||{};
+      const isConflict=dd.ng&&dd.ng.has&&dd.ng.has(k);
+      const td=document.createElement('td');td.className='cell';
+      if(isConflict){td.classList.add('conflict');conflicts.push(`${name.split(' ')[0]} ${month}/${d}`);}
+      if(dd.wish)td.classList.add('wish-mark');
+      if(dd.kibou)td.classList.add('kibou-mark');
+      if(dd.limit&&!dd.wish&&!dd.kibou)td.classList.add('limit-mark');
+      td.style.background=sh.bg;td.style.color=sh.fg;td.textContent=sh.l;
+      let tip='';
+      if(dd.wish)tip+='希望休\n';
+      if(dd.kibou)tip+=`希望勤務: ${shiftByKey(dd.kibou).l}\n`;
+      if(dd.limit){const ngN=dd.ng&&dd.ng.size?[...dd.ng].map(k2=>shiftByKey(k2).l).join('・'):'';if(ngN)tip+=ngN+'は不可\n';if(dd.comment)tip+=dd.comment;}
+      if(tip)td.title=tip.trim();
+      td.onclick=e=>openPicker(name,d,td,e);row.appendChild(td);
+      if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined)grpSums[sh.group]+=sh.count||0;
     }
-    // 集計列
     GROUPS.forEach(g=>{
-      const val=grpTotals[g.name]||0;
+      const v=grpSums[g.name]||0;
+      const td=document.createElement('td');td.className='td-sum';
+      const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
+      if(sh0){td.style.background=sh0.bg;td.style.color=sh0.fg;}
       if(g.special==='shukyu'){
-        const kijun=shukyuKijun[month]||8;
-        const diff=val-kijun;
-        const cls=diff>0?'c-over':diff<0?'c-warn':'c-ok';
-        rowHtml+=`<td class="td-sum ${cls}" style="background:${SHIFTS.find(s=>s.group===g.name)?.bg||'#fff'};color:${SHIFTS.find(s=>s.group===g.name)?.fg||'#000'}">${val}${diff!==0?' '+(diff>0?'+':'')+diff:''}</td>`;
-      } else if(g.special==='nenkyu'){
-        const yd=nenkyuData[name]||{grant:0,carry:0};
-        const total=(yd.grant||0)+(yd.carry||0);
-        const remain=total-val;
-        const cls=remain<=0?'c-warn':remain<=5?'c-warn':'c-ok';
-        rowHtml+=`<td class="td-sum ${cls}" style="background:${SHIFTS.find(s=>s.group===g.name)?.bg||'#fff'};color:${SHIFTS.find(s=>s.group===g.name)?.fg||'#000'}">${val}</td>`;
-      } else {
-        rowHtml+=`<td class="td-sum" style="background:${SHIFTS.find(s=>s.group===g.name)?.bg||'#fff'};color:${SHIFTS.find(s=>s.group===g.name)?.fg||'#000'}">${val}</td>`;
+        const kijun=shukyuKijun[month]||8;const diff=v-kijun;
+        const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
+        td.textContent=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
+        td.className='td-sum '+(diff>0?'c-over':diff===0?'c-ok':'c-neu');
+      } else {td.textContent=Number.isInteger(v)?v:v.toFixed(1);}
+      row.appendChild(td);
+      if(g.special==='nenkyu'){
+        const nk=calcNenkyu(name);const td2=document.createElement('td');
+        td2.textContent=nk.remain<0?`${nk.remain}日`:`残${nk.remain}日`;
+        td2.className='td-sum '+(nk.remain<0?'c-over':nk.remain<=5?'c-warn':'c-ok');row.appendChild(td2);
       }
     });
-    // 有給残
-    const yd=nenkyuData[name]||{grant:0,carry:0};
-    const total=(yd.grant||0)+(yd.carry||0);
-    const nenUsed=grpTotals['有給']||0;
-    const remain=total-nenUsed;
-    rowHtml+=`<td class="td-sum ${remain<=0?'c-warn':remain<=5?'c-warn':'c-ok'}">残${remain}日</td></tr>`;
-    tbHtml+=rowHtml;
+    tbody.appendChild(row);
   });
-  tbody.innerHTML=tbHtml;
 
-  // tfoot（当直数・待機者）
-  let tfHtml='<tr><td class="td-name">当直数</td>';
-  const tochoAlerts=[];
+  const tfoot=document.getElementById('admin-tfoot');tfoot.innerHTML='';
+  // 当直数行
+  const ftr=document.createElement('tr');
+  const ftd=document.createElement('td');ftd.className='td-name';ftd.textContent='当直数';ftr.appendChild(ftd);
   for(let d=1;d<=days;d++){
-    const cnt=tochoCount[d];
-    const isTD=isTochoDay(month,d);
-    const cls=isTD&&cnt<2?'style="background:#fee2e2;color:#991b1b"':'style="background:var(--surface2);color:var(--text2)"';
-    tfHtml+=`<td style="font-weight:500;font-size:10px;text-align:center;padding:3px 2px;${isTD&&cnt<2?'background:rgb(254,226,226);color:rgb(153,27,27)':'background:rgb(240,239,233);color:rgb(160,158,151)'}">${cnt}</td>`;
-    if(isTD&&cnt<2) tochoAlerts.push(`${d}日(${cnt}名)`);
+    const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='tocho').length;
+    const isTD=isTochoDay(month,d);const td=document.createElement('td');
+    td.style.cssText='font-weight:500;font-size:10px;text-align:center;padding:3px 2px';td.textContent=cnt;
+    if(isTD){td.style.background=cnt>=2?'#dcfce7':'#fee2e2';td.style.color=cnt>=2?'#166534':'#991b1b';}
+    else{td.style.background='#f0efe9';td.style.color='#a09e97';}
+    ftr.appendChild(td);
   }
-  GROUPS.forEach(()=>{ tfHtml+='<td></td>'; });
-  tfHtml+='<td></td></tr>';
-
+  GROUPS.forEach(g=>{ftr.appendChild(document.createElement('td'));if(g.special==='nenkyu')ftr.appendChild(document.createElement('td'));});
+  tfoot.appendChild(ftr);
   // 待機者行
-  tfHtml+='<tr class="taiki-row"><td class="td-name" style="font-size:10px;color:#166534;font-weight:500;padding:3px 6px;background:#f0fdf4">待機者</td>';
-  const noTaikiDays=[];
+  const ftr2=document.createElement('tr');ftr2.className='taiki-row';
+  const ftd2=document.createElement('td');ftd2.className='td-name';ftd2.style.cssText='font-size:10px;color:#166534;font-weight:500;padding:3px 6px;background:#f0fdf4';ftd2.textContent='待機者';ftr2.appendChild(ftd2);
+  for(let d=1;d<=days;d++){
+    const isTD=isTochoDay(month,d);const td=document.createElement('td');td.className='taiki-name-cell';
+    if(!isTD){const ts=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki');td.textContent=ts.map(n=>n.split(' ')[0]).join(' ');td.title=ts.join('、');}
+    else{td.textContent='—';td.style.color='#a09e97';}
+    ftr2.appendChild(td);
+  }
+  GROUPS.forEach(g=>{ftr2.appendChild(document.createElement('td'));if(g.special==='nenkyu')ftr2.appendChild(document.createElement('td'));});
+  tfoot.appendChild(ftr2);
+
+  // alerts
+  const ab=document.getElementById('alert-bar');const msgs=[];
+  const uniqueC=[...new Set(conflicts)];const tochoAlert=[],taikiAlert=[];
+  for(let d=1;d<=days;d++){
+    if(isTochoDay(month,d)){
+      const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='tocho').length;
+      if(cnt<2)tochoAlert.push(`${d}日(${cnt}名)`);
+    } else if(!isSat(year,month,d)&&!isSun(year,month,d)&&!hols.has(d)){
+      const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki').length;
+      if(cnt<1)taikiAlert.push(d+'日');
+    }
+  }
+  if(tochoAlert.length)msgs.push(`当直不足(2名未満): ${tochoAlert.join('・')}`);
+  if(taikiAlert.length)msgs.push(`待機者なし(平日): ${taikiAlert.join('・')}`);
+  if(uniqueC.length)msgs.push(`条件違反⚠: ${uniqueC.join('、')}`);
+  // 希望休 1日あたり上限超過チェック
+  const dayLimit=cfg.wishDayLimit||2;
+  const wishOverDays=[];
+  for(let d=1;d<=days;d++){
+    if(isSat(year,month,d)||isSun(year,month,d)||hols.has(d))continue;
+    const cnt=STAFF.filter(n=>staffData[n]?.[month]?.[d]?.wish).length;
+    if(cnt>dayLimit)wishOverDays.push(`${d}日(${cnt}名)`);
+  }
+  if(wishOverDays.length)msgs.push(`希望休 上限超過(平日${dayLimit}名まで): ${wishOverDays.join('・')}`);
+  if(msgs.length){ab.innerHTML=msgs.join('<br>');ab.classList.add('on');}else ab.classList.remove('on');
+
+  const bar=document.getElementById('stat-bar');bar.innerHTML='';
+  const totalTocho=STAFF.reduce((a,n)=>a+(schedData[month][n]?schedData[month][n].filter(k=>k==='tocho').length:0),0);
+  const wishCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[month]||{}).filter(v=>v.wish).length,0);
+  const kibouCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[month]||{}).filter(v=>v.kibou).length,0);
+  [{label:'当直計',val:totalTocho,sub:'今月',col:'#991b1b'},
+   {label:'希望休',val:wishCnt,sub:'件',col:'#854d0e'},
+   {label:'希望勤務',val:kibouCnt,sub:'件',col:'#166534'},
+   {label:'条件違反',val:uniqueC.length,sub:'要確認',col:uniqueC.length?'#dc2626':'#166534'},
+  ].forEach(s=>{
+    const el=document.createElement('div');el.className='stat';
+    el.innerHTML=`<div class="stat-label">${s.label}</div><div class="stat-val" style="color:${s.col}">${s.val}</div><div class="stat-sub">${s.sub}</div>`;
+    bar.appendChild(el);
+  });
+}
+
+function resetMonth(){
+  if(!confirm(`${month}月の勤務割り当てをリセットします。\n希望休・希望勤務・勤務条件のデータは保持されます。\n\nよろしいですか？`))return;
+  const days=daysInMonth(year,month);
+  STAFF.forEach(name=>{
+    schedData[month][name]=[];
+    for(let d=1;d<=days;d++){
+      const dd=staffData[name]?.[month]?.[d]||{};
+      // 希望休は週休として反映
+      if(dd.wish)schedData[month][name].push('shukyu');
+      else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d))schedData[month][name].push('shukyu');
+      else schedData[month][name].push('nikkn');
+    }
+  });
+  saveAll();renderAdmin();
+}
+
+function exportExcel(){
+  if(typeof ExcelJS==='undefined'){alert('ExcelJSの読み込みに失敗しました。インターネット接続を確認してください。');return;}
+  ensureSchedule(month);
+  const days=daysInMonth(year,month);
+  const hols=getHolidays(year,month);
+
+  // 色をARGBに変換（#rrggbb → 'FFrrggbb'）
+  const argb=c=>'FF'+(c||'#f0efe9').replace('#','').toUpperCase();
+
+  // セルスタイル生成ヘルパー
+  const makeStyle=(bg,fg,bold=false,align='center')=>({
+    fill:{type:'pattern',pattern:'solid',fgColor:{argb:argb(bg)}},
+    font:{color:{argb:argb(fg)},bold,name:'Noto Sans JP',size:9},
+    alignment:{horizontal:align,vertical:'middle',wrapText:false},
+    border:{top:{style:'thin',color:{argb:'FFE2E0D8'}},bottom:{style:'thin',color:{argb:'FFE2E0D8'}},left:{style:'thin',color:{argb:'FFE2E0D8'}},right:{style:'thin',color:{argb:'FFE2E0D8'}}}
+  });
+
+  const wb=new ExcelJS.Workbook();
+  const ws=wb.addWorksheet(`${month}月`,{
+    pageSetup:{paperSize:9,orientation:'landscape',fitToPage:true,fitToWidth:1,fitToHeight:0}
+  });
+  ws.pageSetup.margins={left:0.5,right:0.5,top:0.75,bottom:0.75,header:0.3,footer:0.3};
+
+  const totalCols=1+days+GROUPS.reduce((a,g)=>a+1+(g.special==='nenkyu'?1:0),0);
+
+  // 列幅設定
+  ws.getColumn(1).width=10;
+  for(let d=1;d<=days;d++)ws.getColumn(1+d).width=5.5;
+  let ci=2+days;
+  GROUPS.forEach(g=>{ws.getColumn(ci++).width=8;if(g.special==='nenkyu')ws.getColumn(ci++).width=7;});
+
+  // ── 行1: タイトル（背景なし・文字黒）──
+  const titleRow=ws.getRow(1);
+  titleRow.height=22;
+  const titleCell=titleRow.getCell(1);
+  titleCell.value=`${cfg.title} 勤務表 ${year}年${month}月`;
+  const titleStyle={
+    fill:{type:'pattern',pattern:'none'},
+    font:{color:{argb:'FF1a1917'},bold:true,name:'Noto Sans JP',size:11},
+    alignment:{horizontal:'center',vertical:'middle'},
+    border:{top:{style:'thin',color:{argb:'FFE2E0D8'}},bottom:{style:'thin',color:{argb:'FFE2E0D8'}},left:{style:'thin',color:{argb:'FFE2E0D8'}},right:{style:'thin',color:{argb:'FFE2E0D8'}}}
+  };
+  titleCell.style=titleStyle;
+  ws.mergeCells(1,1,1,totalCols);
+  ws.getCell(1,1).style=titleStyle;
+
+  // ── 行2: ヘッダー ──
+  const hdrRow=ws.getRow(2);
+  hdrRow.height=20;
+  hdrRow.getCell(1).value='氏名';
+  hdrRow.getCell(1).style=makeStyle('#f0efe9','#6b6860',true,'center');
+  for(let d=1;d<=days;d++){
+    const isTD=isTochoDay(month,d),isH=hols.has(d),isS=isSat(year,month,d),isSn=isSun(year,month,d);
+    const bg=isTD?'#ffedd5':isH?'#fff3cd':isS?'#dbeafe':isSn?'#fee2e2':'#f0efe9';
+    const fg=isTD?'#c2410c':isH?'#b45309':isS?'#1e40af':isSn?'#991b1b':'#6b6860';
+    const cell=hdrRow.getCell(1+d);
+    cell.value=`${d}(${DOW[getDow(year,month,d)]})`;
+    cell.style=makeStyle(bg,fg,true,'center');
+  }
+  let hci=2+days;
+  GROUPS.forEach(g=>{
+    hdrRow.getCell(hci).value=g.name+'計';
+    hdrRow.getCell(hci).style=makeStyle('#e0e7ff','#3730a3',true,'center');
+    hci++;
+    if(g.special==='nenkyu'){
+      hdrRow.getCell(hci).value='有給残';
+      hdrRow.getCell(hci).style=makeStyle('#e0e7ff','#3730a3',true,'center');
+      hci++;
+    }
+  });
+
+  // ── スタッフ行 ──
+  STAFF.forEach((name,si)=>{
+    const row=ws.getRow(3+si);
+    row.height=16;
+    const grpSums={};GROUPS.forEach(g=>{grpSums[g.name]=0;});
+
+    // 氏名列
+    row.getCell(1).value=name;
+    row.getCell(1).style=makeStyle('#f0efe9','#57534e',true,'left');
+
+    // 勤務セル
+    for(let d=1;d<=days;d++){
+      const k=(schedData[month][name]&&schedData[month][name][d-1])||'empty';
+      const sh=shiftByKey(k);
+      const cell=row.getCell(1+d);
+      cell.value=sh.l;
+      cell.style=makeStyle(sh.bg,sh.fg,false,'center');
+      if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined)grpSums[sh.group]+=sh.count||0;
+    }
+
+    // 集計列
+    let sci=2+days;
+    GROUPS.forEach(g=>{
+      const v=grpSums[g.name]||0;
+      const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
+      const gbg=sh0?sh0.bg:'#f0efe9';const gfg=sh0?sh0.fg:'#57534e';
+      const gcell=row.getCell(sci);
+      if(g.special==='shukyu'){
+        const kijun=shukyuKijun[month]||8;const diff=v-kijun;
+        const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
+        gcell.value=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
+      } else {gcell.value=Number.isInteger(v)?v:v.toFixed(1);}
+      gcell.style=makeStyle(gbg,gfg,true,'center');
+      sci++;
+      if(g.special==='nenkyu'){
+        const nk=calcNenkyu(name);
+        const nkCell=row.getCell(sci);
+        nkCell.value=nk.remain<0?`${nk.remain}日`:`残${nk.remain}日`;
+        const nbg=nk.remain<0?'#FCEBEB':nk.remain<=5?'#FAEEDA':'#EAF3DE';
+        const nfg=nk.remain<0?'#A32D2D':nk.remain<=5?'#854F0B':'#27500A';
+        nkCell.style=makeStyle(nbg,nfg,true,'center');
+        sci++;
+      }
+    });
+  });
+
+  // ── 当直数行 ──
+  const tochoRow=ws.getRow(3+STAFF.length);
+  tochoRow.height=16;
+  tochoRow.getCell(1).value='当直数';
+  tochoRow.getCell(1).style=makeStyle('#f0efe9','#57534e',true,'left');
   for(let d=1;d<=days;d++){
     const isTD=isTochoDay(month,d);
-    const dow=getDow(year,month,d);
-    const isWeekend=(dow===0||dow===6||hols.has(d));
-    const names=(taikiByDay[d]||[]);
-    if(!isTD&&!isWeekend&&names.length===0) noTaikiDays.push(d+'日');
+    const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='tocho').length;
+    const cell=tochoRow.getCell(1+d);
     if(isTD){
-      tfHtml+=`<td class="taiki-name-cell" style="color:var(--text3)">—</td>`;
+      cell.value=cnt;
+      cell.style=makeStyle(cnt>=2?'#dcfce7':'#fee2e2',cnt>=2?'#166534':'#991b1b',true,'center');
     } else {
-      tfHtml+=`<td class="taiki-name-cell" title="${names.join(',')}">${names.map(n=>n.split(' ')[0]).join('/')}</td>`;
+      cell.value='';
+      cell.style=makeStyle('#f0efe9','#a09e97',false,'center');
     }
   }
-  GROUPS.forEach(()=>{ tfHtml+='<td></td>'; });
-  tfHtml+='<td></td></tr>';
-  tfoot.innerHTML=tfHtml;
-  totalTocho=tochoCount.reduce((a,b)=>a+b,0);
 
-  // alert bar
-  const alertMsgs=[];
-  if(tochoAlerts.length>0) alertMsgs.push('当直不足(2名未満): '+tochoAlerts.join('・'));
-  if(noTaikiDays.length>0) alertMsgs.push('待機者なし(平日): '+noTaikiDays.join('・'));
-  if(alertBar){
-    if(alertMsgs.length>0){alertBar.innerHTML=alertMsgs.join('<br>');alertBar.classList.add('on');}
-    else{alertBar.classList.remove('on');}
-  }
-
-  // stat bar
-  const sb=document.getElementById('stat-bar');
-  if(sb) sb.innerHTML=`
-    <div class="stat"><div class="stat-label">当直計</div><div class="stat-val" style="color:#991b1b">${totalTocho}</div><div class="stat-sub">今月</div></div>
-    <div class="stat"><div class="stat-label">希望休</div><div class="stat-val" style="color:#854d0e">${totalWish}</div><div class="stat-sub">件</div></div>
-    <div class="stat"><div class="stat-label">希望勤務</div><div class="stat-val" style="color:#166534">${totalKibou}</div><div class="stat-sub">件</div></div>
-    <div class="stat"><div class="stat-label">条件違反</div><div class="stat-val" style="color:${totalConflict>0?'#dc2626':'#166534'}">${totalConflict}</div><div class="stat-sub">要確認</div></div>`;
-}
-
-/* ══ PICKER ══ */
-function openPicker(name,d){
-  const overlay=document.getElementById('pk-overlay');
-  const info=document.getElementById('pk-info');
-  const shiftsEl=document.getElementById('pk-shifts');
-  if(!overlay) return;
-  const dow=DOW[getDow(year,month,d)];
-  if(info) info.innerHTML=`<div style="font-weight:700;margin-bottom:8px">${name} ${d}日(${dow})</div>`;
-  const cur=(schedData[month]&&schedData[month][name])?schedData[month][name][d-1]:'nikkn';
-  if(shiftsEl) shiftsEl.innerHTML=SHIFTS.filter(s=>s.visible).map(s=>
-    `<button class="pk-shift-btn${s.k===cur?' selected':''}" style="background:${s.bg};color:${s.fg};padding:10px 14px;border-radius:6px;border:2px solid ${s.k===cur?s.fg:'transparent'};font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;margin:3px"
-      onclick="setPick('${name}',${d},'${s.k}')">${s.l}</button>`
-  ).join('');
-  overlay.classList.add('on');
-}
-
-function setPick(name,d,k){
-  ensureSchedule(month);
-  if(!schedData[month][name]) schedData[month][name]=new Array(daysInMonth(year,month)).fill('nikkn');
-  schedData[month][name][d-1]=k;
-  // autoAke
-  if(k==='tocho'&&cfg.autoAke&&d<daysInMonth(year,month)){
-    schedData[month][name][d]='ake';
-  }
-  closePicker();
-  renderAdminTbl();
-  saveAll();
-}
-
-function closePicker(){
-  const overlay=document.getElementById('pk-overlay');
-  if(overlay) overlay.classList.remove('on');
-}
-
-/* ══ RESET / CLEAR ══ */
-function resetMonth(){
-  if(!confirm(year+'年'+month+'月のシフトをリセットしますか？')) return;
-  delete schedData[month];
-  ensureSchedule(month);
-  renderAdminTbl();renderStaffCal();
-  saveAll();
-}
-
-function clearData(){
-  if(!confirm('全データをリセットしますか？この操作は取り消せません。')) return;
-  schedData={};staffData={};nenkyuData={};tochoDays={};
-  STAFF.forEach(n=>{nenkyuData[n]={grant:0,carry:0};});
-  tochoDays[month]=new Set();
-  ensureSchedule(month);
-  renderAdminTbl();renderStaffCal();renderSummary();renderYkCard();
-  saveAll();
-}
-
-/* ══ STAFF MANAGEMENT ══ */
-function addStaff(){
-  const inp=document.getElementById('add-staff-inp');
-  if(!inp) return;
-  const name=inp.value.trim();
-  if(!name){alert('氏名を入力してください');return;}
-  if(STAFF.includes(name)){alert('既に登録されています');return;}
-  STAFF.push(name);
-  staffData[name]={};
-  nenkyuData[name]={grant:0,carry:0};
-  ensureSchedule(month);
-  inp.value='';
-  renderStaffMgrList();rebuildStaffSelect();renderAdminTbl();
-  saveAll();
-}
-
-function removeStaff(idx){
-  const name=STAFF[idx];
-  if(!confirm(name+'を削除しますか？')) return;
-  STAFF.splice(idx,1);
-  delete staffData[name];
-  Object.keys(schedData).forEach(m=>{delete schedData[m][name];});
-  if(currentStaff===name) currentStaff=STAFF[0]||'';
-  renderStaffMgrList();rebuildStaffSelect();renderAdminTbl();renderStaffCal();
-  saveAll();
-}
-
-function moveStaff(idx,dir){
-  const ni=idx+dir;
-  if(ni<0||ni>=STAFF.length) return;
-  [STAFF[idx],STAFF[ni]]=[STAFF[ni],STAFF[idx]];
-  renderStaffMgrList();rebuildStaffSelect();renderAdminTbl();
-  saveAll();
-}
-
-function renderStaffMgrList(){
-  const list=document.getElementById('staff-mgr-list');
-  if(!list) return;
-  list.innerHTML=STAFF.map((n,i)=>`
-    <div class="staff-mgr-item" draggable="true" data-idx="${i}">
-      <span class="smgr-handle" title="ドラッグで並び替え">⠿</span>
-      <span class="smgr-name">${n}</span>
-      <div class="smgr-btns">
-        <button class="smgr-mv" onclick="moveStaff(${i},-1)">▲</button>
-        <button class="smgr-mv" onclick="moveStaff(${i},1)">▼</button>
-        <button class="smgr-del" onclick="removeStaff(${i})">削除</button>
-      </div>
-    </div>`).join('');
-}
-
-/* ══ SHIFT LIST ══ */
-function renderShiftList(){
-  const list=document.getElementById('shift-list');
-  if(!list) return;
-  list.innerHTML=SHIFTS.map((s,i)=>`
-    <div class="shift-row">
-      <div class="sh-handle">⠿</div>
-      <div class="sh-chip" style="background:${s.bg};color:${s.fg}" contenteditable="true"
-        onblur="SHIFTS[${i}].l=this.textContent.trim();saveAll()">${s.l}</div>
-      <select class="sh-select" onchange="SHIFTS[${i}].count=parseFloat(this.value);saveAll()">
-        ${[0,0.5,1].map(v=>`<option${s.count===v?' selected':''}>${v}</option>`).join('')}
-      </select>
-      <select class="sh-select" onchange="SHIFTS[${i}].group=this.value;saveAll()">
-        ${['日勤','当直','週休','有給','なし'].map(g=>`<option${s.group===g?' selected':''}>${g}</option>`).join('')}
-      </select>
-      <input type="color" value="${s.bg}" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px"
-        onchange="SHIFTS[${i}].bg=this.value;renderShiftList();saveAll()">
-      <select class="sh-select" onchange="SHIFTS[${i}].visible=this.value==='表示';saveAll()">
-        <option${s.visible?' selected':''}>表示</option>
-        <option${!s.visible?' selected':''}>非表示</option>
-      </select>
-      <div class="sh-del" onclick="removeShift(${i})">×</div>
-    </div>`).join('');
-}
-
-function addShift(){
-  SHIFTS.push({k:'shift'+Date.now(),l:'新勤務',bg:'#e0e0e0',fg:'#333',count:1,group:'日勤',visible:true});
-  renderShiftList();saveAll();
-}
-
-function removeShift(idx){
-  if(SHIFTS.length<=1){alert('最低1つ必要です');return;}
-  SHIFTS.splice(idx,1);
-  renderShiftList();saveAll();
-}
-
-/* ══ GROUP LIST ══ */
-function addGroup(){
-  GROUPS.push({name:'新グループ',special:null});
-  renderGroupList();saveAll();
-}
-
-function removeGroup(idx){
-  GROUPS.splice(idx,1);
-  renderGroupList();saveAll();
-}
-
-function renderGroupList(){
-  const list=document.getElementById('grp-list');
-  if(!list) return;
-  list.innerHTML=GROUPS.map((g,i)=>`
-    <div class="grp-row">
-      <input class="grp-inp" value="${g.name}" onchange="GROUPS[${i}].name=this.value;renderShiftList();saveAll()">
-      <select class="sh-select" onchange="GROUPS[${i}].special=this.value==='なし'?null:this.value;saveAll()">
-        <option value="なし"${!g.special?' selected':''}>特殊なし</option>
-        <option value="shukyu"${g.special==='shukyu'?' selected':''}>週休（差分表示）</option>
-        <option value="nenkyu"${g.special==='nenkyu'?' selected':''}>有給（残日数）</option>
-      </select>
-      <div class="sh-del" onclick="removeGroup(${i})">×</div>
-    </div>`).join('');
-}
-
-/* ══ TOCHO CALENDAR ══ */
-function renderTochoCal(){
-  const cal=document.getElementById('tc-cal');
-  const lbl=document.getElementById('tc-month-label');
-  const dlbl=document.getElementById('tc-days-label');
-  if(!cal) return;
-  if(lbl) lbl.textContent=year+'年'+month+'月';
-  const days=daysInMonth(year,month);
-  const fd=firstDow(year,month);
-  const hols=getHolidays(year,month);
-  if(!tochoDays[month]) tochoDays[month]=new Set();
-  let html='';
-  for(let i=0;i<fd;i++) html+='<div class="tc-cell empty"></div>';
+  // ── 待機者行 ──
+  const taikiRow=ws.getRow(4+STAFF.length);
+  taikiRow.height=16;
+  taikiRow.getCell(1).value='待機者';
+  taikiRow.getCell(1).style=makeStyle('#f0fdf4','#166534',true,'left');
   for(let d=1;d<=days;d++){
-    const dow=getDow(year,month,d);
-    const isH=hols.has(d);
-    const isTD=tochoDays[month].has(d);
-    let cls='tc-cell';
-    if(isTD) cls+=' tocho';
-    else if(isH) cls+=' hol';
-    else if(dow===0) cls+=' sun';
-    else if(dow===6) cls+=' sat';
-    html+=`<div class="${cls}" onclick="toggleTocho(${d})">${d}</div>`;
+    const cell=taikiRow.getCell(1+d);
+    if(!isTochoDay(month,d)){
+      const ts=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki');
+      cell.value=ts.map(n=>n.split(' ')[0]).join(' ');
+    } else {cell.value='';}
+    cell.style=makeStyle('#f0fdf4','#166534',false,'center');
   }
-  cal.innerHTML=html;
-  if(dlbl){
-    const sorted=[...tochoDays[month]].sort((a,b)=>a-b);
-    dlbl.textContent=sorted.length>0?sorted.map(d=>d+'日').join('・'):'なし';
-  }
-}
 
-function toggleTocho(d){
-  if(!tochoDays[month]) tochoDays[month]=new Set();
-  if(tochoDays[month].has(d)) tochoDays[month].delete(d);
-  else tochoDays[month].add(d);
-  renderTochoCal();renderAdminTbl();saveAll();
-}
-
-/* ══ NENKYU PANEL ══ */
-function renderNenkyuPanel(){
-  const list=document.getElementById('nk-list');
-  const yl=document.getElementById('nk-year-label');
-  if(!list) return;
-  if(yl) yl.textContent=getNenkyuFiscalYear();
-  list.innerHTML=`<div class="nk-row" style="font-size:10px;font-weight:500;color:var(--text3);background:none;padding:2px 10px;min-height:auto">
-    <div>氏名</div><div>本年度付与</div><div>前年度繰越</div><div>消化合計／残</div></div>`+
-  STAFF.map(name=>{
-    const yd=nenkyuData[name]||{grant:0,carry:0};
-    const sched=schedData[month]&&schedData[month][name]||[];
-    let used=0;
-    sched.forEach(k=>{const s=shiftByKey(k);if(s&&s.group==='有給')used+=s.count;});
-    const remain=(yd.grant||0)+(yd.carry||0)-used;
-    const cls=remain<=0?'c-warn':remain<=5?'c-warn':'c-ok';
-    const short=name.split(' ')[0]||name;
-    return `<div class="nk-row">
-      <div class="nk-name">${short}</div>
-      <div class="nk-inp-wrap">
-        <input type="number" class="nk-inp" min="0" max="40" value="${yd.grant||0}"
-          onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0};nenkyuData['${name}'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()">
-        <span style="font-size:11px;color:var(--text2)">日</span>
-      </div>
-      <div class="nk-inp-wrap">
-        <input type="number" class="nk-inp" min="0" max="40" value="${yd.carry||0}"
-          onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0};nenkyuData['${name}'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()">
-        <span style="font-size:11px;color:var(--text2)">日</span>
-      </div>
-      <div class="nk-status ${cls}">消化${used}日 ／ 残${remain}日</div>
-    </div>`;
-  }).join('');
-}
-
-function updateNenkyu(){
-  if(!confirm('有給を更新しますか？現在の残日数が前年度繰越にセットされます。')) return;
-  STAFF.forEach(name=>{
-    const yd=nenkyuData[name]||{grant:0,carry:0};
-    const sched=schedData[month]&&schedData[month][name]||[];
-    let used=0;
-    sched.forEach(k=>{const s=shiftByKey(k);if(s&&s.group==='有給')used+=s.count;});
-    const remain=(yd.grant||0)+(yd.carry||0)-used;
-    nenkyuData[name]={grant:0,carry:Math.max(0,remain)};
-  });
-  renderNenkyuPanel();saveAll();
-}
-
-/* ══ EXCEL EXPORT ══ */
-function exportExcel(){
-  if(typeof ExcelJS==='undefined'){alert('ExcelJSが読み込まれていません');return;}
-  const wb=new ExcelJS.Workbook();
-  const ws=wb.addWorksheet(year+'年'+month+'月');
-  ensureSchedule(month);
-  const days=daysInMonth(year,month);
-  const hols=getHolidays(year,month);
-  // header row
-  const headerRow=['氏名'];
-  for(let d=1;d<=days;d++) headerRow.push(d+'('+DOW[getDow(year,month,d)]+')');
-  GROUPS.forEach(g=>headerRow.push(g.name+'計'));
-  headerRow.push('有給残');
-  ws.addRow(headerRow);
-  ws.getRow(1).eachCell(cell=>{
-    cell.font={bold:true,size:9};
-    cell.alignment={horizontal:'center',vertical:'middle'};
-    cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFE2E0D8'}};
-    cell.border={bottom:{style:'thin'}};
-  });
-  // data rows
-  STAFF.forEach(name=>{
-    const sched=schedData[month][name]||[];
-    const row=[name];
-    const grpTotals={};GROUPS.forEach(g=>{grpTotals[g.name]=0;});
-    for(let d=1;d<=days;d++){
-      const k=sched[d-1]||'nikkn';
-      const s=shiftByKey(k);
-      row.push(s.l);
-      if(grpTotals[s.group]!==undefined) grpTotals[s.group]+=s.count;
-    }
-    GROUPS.forEach(g=>row.push(grpTotals[g.name]||0));
-    const yd=nenkyuData[name]||{grant:0,carry:0};
-    const nenUsed=grpTotals['有給']||0;
-    row.push((yd.grant||0)+(yd.carry||0)-nenUsed);
-    const wsRow=ws.addRow(row);
-    // 氏名列
-    wsRow.getCell(1).font={size:9,bold:true};
-    wsRow.getCell(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFF0EFE9'}};
-    // 日付列の色
-    for(let d=1;d<=days;d++){
-      const k=sched[d-1]||'nikkn';
-      const s=shiftByKey(k);
-      const cell=wsRow.getCell(d+1);
-      cell.font={size:9,color:{argb:'FF'+s.fg.replace('#','')}};
-      cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+s.bg.replace('#','')}};
-      cell.alignment={horizontal:'center',vertical:'middle'};
-    }
-  });
-  // 列幅
-  ws.getColumn(1).width=10;
-  for(let d=2;d<=days+1;d++) ws.getColumn(d).width=5;
-  ws.pageSetup={orientation:'landscape',paperSize:9,fitToPage:true,fitToWidth:1,fitToHeight:0};
+  // ── ダウンロード ──
   wb.xlsx.writeBuffer().then(buf=>{
     const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);
-    a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.xlsx`;
-    a.click();
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.xlsx`;a.click();
+  }).catch(e=>{alert('Excel出力に失敗しました: '+e.message);});
+}
+function openPicker(name,d,td,e){
+  const dd=staffData[name]?.[month]?.[d]||{};
+  const ngSet=dd.ng||new Set();
+  const info=document.getElementById('pk-info');
+  const dow=DOW[getDow(year,month,d)];
+  let html=`<strong>${name.split(' ')[0]}　${month}/${d}（${dow}）</strong>`;
+  if(dd.wish)html+=`<br><span style="color:var(--f-wish)">● 希望休あり</span>`;
+  if(dd.kibou)html+=`<br><span style="color:var(--f-kibou)">★ 希望勤務: ${shiftByKey(dd.kibou).l}</span>`;
+  if(dd.limit){const ngN=[...ngSet].map(k=>shiftByKey(k).l).join('・');if(ngN)html+=`<div class="pk-conflict">▲ ${ngN}は不可</div>`;if(dd.comment)html+=`<div class="pk-comment">${dd.comment}</div>`;}
+  if(dd.wish||dd.kibou||dd.limit){info.innerHTML=html;info.classList.add('on');}else info.classList.remove('on');
+  const shiftsEl=document.getElementById('pk-shifts');shiftsEl.innerHTML='';
+  SHIFTS.filter(s=>s.visible).forEach(s=>{
+    const isCf=ngSet.has(s.k);
+    const btn=document.createElement('button');btn.className='pk-btn'+(isCf?' cf':'');
+    btn.style.background=s.bg;btn.style.color=s.fg;btn.textContent=(isCf?'⚠ ':'')+s.l;
+    btn.onclick=()=>{assignShift(name,d,s.k);closePicker();renderAdmin();};
+    shiftsEl.appendChild(btn);
   });
+  document.getElementById('pk-overlay').classList.add('on');
+}
+function closePicker(){document.getElementById('pk-overlay').classList.remove('on');}
+function assignShift(name,d,k){
+  if(!schedData[month])schedData[month]={};ensureSchedule(month);
+  schedData[month][name][d-1]=k;
+  if(k==='tocho'&&cfg.autoAke){
+    const days=daysInMonth(year,month);
+    if(d<days){schedData[month][name][d]='ake';}
+    else{const nm=month===12?1:month+1;ensureSchedule(nm);if(schedData[nm][name])schedData[nm][name][0]='ake';}
+  }
+  saveAll();
+}
+
+/* ══ SETTINGS ══ */
+function showSetPanel(p){
+  document.querySelectorAll('.set-panel').forEach(el=>el.classList.remove('on'));
+  document.querySelectorAll('.set-nav-btn').forEach(el=>el.classList.remove('on'));
+  document.getElementById('sp-'+p).classList.add('on');
+  const map={basic:0,staff:1,shifts:2,shukyu:3,tocho:4,nenkyu:5,data:6};
+  document.querySelectorAll('.set-nav-btn')[map[p]||0].classList.add('on');
+  if(p==='staff')renderStaffMgr();if(p==='shifts')renderShiftList();if(p==='shukyu')renderShukyuKijun();
+  if(p==='tocho')renderTochoCal();if(p==='nenkyu')renderNenkyuPanel();
+}
+function renderSettings(){
+  document.getElementById('cfg-title').value=cfg.title;
+  document.getElementById('cfg-auto-ake').checked=cfg.autoAke!==false;
+  document.getElementById('cfg-wish-limit').value=cfg.wishLimit||6;
+  document.getElementById('cfg-wish-day-limit').value=cfg.wishDayLimit||2;
+}
+function saveCfg(){
+  cfg.title=document.getElementById('cfg-title').value||'放射線科';
+  cfg.autoAke=document.getElementById('cfg-auto-ake').checked;
+  cfg.wishLimit=parseInt(document.getElementById('cfg-wish-limit').value)||6;
+  cfg.wishDayLimit=parseInt(document.getElementById('cfg-wish-day-limit').value)||2;
+  document.getElementById('logo-text').innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
+  saveAll();
+}
+function editTitle(){const t=prompt('タイトルを入力してください',cfg.title);if(t!==null){cfg.title=t;document.getElementById('cfg-title').value=t;saveCfg();}}
+
+/* ── Staff Manager ── */
+let dragSrcIdx=null;
+function renderStaffMgr(){
+  const list=document.getElementById('staff-mgr-list');list.innerHTML='';
+  STAFF.forEach((name,i)=>{
+    const item=document.createElement('div');item.className='staff-mgr-item';item.draggable=true;item.dataset.idx=i;
+    item.innerHTML=`<span class="smgr-handle" title="ドラッグで並び替え">⠿</span><span class="smgr-name">${name}</span><div class="smgr-btns"><button class="smgr-mv" onclick="moveStaff(${i},-1)">▲</button><button class="smgr-mv" onclick="moveStaff(${i},1)">▼</button><button class="smgr-del" onclick="removeStaff(${i})">削除</button></div>`;
+    item.addEventListener('dragstart',e=>{dragSrcIdx=i;item.classList.add('dragging');e.dataTransfer.effectAllowed='move';});
+    item.addEventListener('dragend',()=>{item.classList.remove('dragging');document.querySelectorAll('.staff-mgr-item').forEach(el=>el.classList.remove('drag-over'));});
+    item.addEventListener('dragover',e=>{e.preventDefault();item.classList.add('drag-over');});
+    item.addEventListener('dragleave',()=>item.classList.remove('drag-over'));
+    item.addEventListener('drop',e=>{e.preventDefault();item.classList.remove('drag-over');if(dragSrcIdx===null||dragSrcIdx===i)return;const moved=STAFF.splice(dragSrcIdx,1)[0];STAFF.splice(i,0,moved);dragSrcIdx=null;saveAll();rebuildStaffSelect();renderStaffMgr();});
+    list.appendChild(item);
+  });
+  if(!STAFF.length)list.innerHTML='<div class="side-empty">スタッフがいません</div>';
+}
+function moveStaff(i,dir){const j=i+dir;if(j<0||j>=STAFF.length)return;[STAFF[i],STAFF[j]]=[STAFF[j],STAFF[i]];saveAll();rebuildStaffSelect();renderStaffMgr();}
+function addStaff(){
+  const inp=document.getElementById('add-staff-inp');const name=inp.value.trim();if(!name)return;
+  if(STAFF.includes(name)){alert('同じ名前のスタッフがすでにいます');return;}
+  STAFF.push(name);if(!staffData[name])staffData[name]={};if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0};
+  Object.keys(schedData).forEach(m=>{if(!schedData[m][name]){const days=daysInMonth(year,+m);schedData[m][name]=[];for(let d=1;d<=days;d++)schedData[m][name].push((isSat(year,+m,d)||isSun(year,+m,d))?'shukyu':'nikkn');}});
+  inp.value='';saveAll();rebuildStaffSelect();renderStaffMgr();
+}
+function removeStaff(i){const name=STAFF[i];if(!confirm(`「${name}」を削除しますか？`))return;STAFF.splice(i,1);delete staffData[name];delete nenkyuData[name];Object.keys(schedData).forEach(m=>delete schedData[m][name]);saveAll();rebuildStaffSelect();renderStaffMgr();}
+
+/* ── Shift Customizer ── */
+function renderShiftList(){
+  const list=document.getElementById('shift-list');list.innerHTML='';
+  SHIFTS.forEach((s,i)=>{
+    const row=document.createElement('div');row.className='shift-row';
+    const grpOpts=GROUPS.map(g=>`<option${s.group===g.name?' selected':''}>${g.name}</option>`).join('')+`<option${s.group==='なし'?' selected':''}>なし</option>`;
+    const cntOpts=['0','0.5','1'].map(v=>`<option${String(s.count)===v?' selected':''}>${v}</option>`).join('');
+    row.innerHTML=`<div class="sh-handle">⠿</div><div class="sh-chip" style="background:${s.bg};color:${s.fg}" contenteditable="true" onblur="SHIFTS[${i}].l=this.textContent.trim();saveAll()">${s.l}</div><select class="sh-select" onchange="SHIFTS[${i}].count=parseFloat(this.value);saveAll()">${cntOpts}</select><select class="sh-select" onchange="SHIFTS[${i}].group=this.value;saveAll()">${grpOpts}</select><input type="color" value="${s.bg}" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[${i}].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[${i}].visible=this.value==='表示';saveAll()"><option${s.visible?' selected':''}>表示</option><option${!s.visible?' selected':''}>非表示</option></select><div class="sh-del" onclick="removeShift(${i})">×</div>`;
+    list.appendChild(row);
+  });
+  const grpList=document.getElementById('grp-list');grpList.innerHTML='';
+  GROUPS.forEach((g,i)=>{
+    const row=document.createElement('div');row.className='grp-row';
+    const spOpts=['なし','shukyu','nenkyu'].map(v=>`<option value="${v}"${g.special===v?' selected':''}>${v==='なし'?'特殊なし':v==='shukyu'?'週休（差分表示）':'有給（残日数）'}</option>`).join('');
+    row.innerHTML=`<input class="grp-inp" value="${g.name}" onchange="GROUPS[${i}].name=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="GROUPS[${i}].special=this.value==='なし'?null:this.value;saveAll()">${spOpts}</select><div class="sh-del" onclick="removeGroup(${i})">×</div>`;
+    grpList.appendChild(row);
+  });
+}
+function addShift(){SHIFTS.splice(SHIFTS.length-1,0,{k:'sh_'+Date.now(),l:'新規',bg:'#f1f0ea',fg:'#57534e',count:1,group:'なし',visible:true});saveAll();renderShiftList();}
+function removeShift(i){if(!confirm('削除しますか？'))return;SHIFTS.splice(i,1);saveAll();renderShiftList();}
+function addGroup(){GROUPS.push({name:'新グループ',special:null});saveAll();renderShiftList();}
+function removeGroup(i){if(!confirm('削除しますか？'))return;GROUPS.splice(i,1);saveAll();renderShiftList();}
+
+/* ── Monthly Shukyu Kijun ── */
+function renderShukyuKijun(){
+  const grid=document.getElementById('msk-grid');grid.innerHTML='';
+  for(let m=1;m<=12;m++){
+    const item=document.createElement('div');item.className='msk-item';
+    item.innerHTML=`<div class="msk-label">${MN[m-1]}</div><input type="number" class="msk-inp" min="0" max="31" value="${shukyuKijun[m]||8}" onchange="shukyuKijun[${m}]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div>`;
+    grid.appendChild(item);
+  }
+}
+
+/* ── Tocho Cal ── */
+function renderTochoCal(){
+  document.getElementById('tc-month-label').textContent=`${year}年${month}月`;
+  if(!tochoDays[month])tochoDays[month]=new Set();
+  const grid=document.getElementById('tc-cal');grid.innerHTML='';
+  const fd=firstDow(year,month),days=daysInMonth(year,month);
+  const hols=getHolidays(year,month);
+  for(let i=0;i<fd;i++){const e=document.createElement('div');e.className='tc-cell empty';grid.appendChild(e);}
+  for(let d=1;d<=days;d++){
+    const cell=document.createElement('div');
+    const isHolOrSun=hols.has(d)||isSun(year,month,d);
+    cell.className='tc-cell'+(isSat(year,month,d)?' sat':hols.has(d)?' hol':isSun(year,month,d)?' sun':'')+(tochoDays[month].has(d)?' tocho':'');
+    cell.textContent=d;
+    cell.onclick=()=>{if(tochoDays[month].has(d))tochoDays[month].delete(d);else tochoDays[month].add(d);saveAll();renderTochoCal();if(document.getElementById('scr-admin').classList.contains('on'))renderAdmin();};
+    grid.appendChild(cell);
+  }
+  const arr=[...tochoDays[month]].sort((a,b)=>a-b);
+  document.getElementById('tc-days-label').textContent=arr.length?arr.map(d=>d+'日').join('・'):'なし';
+}
+
+/* ── Nenkyu Panel ── */
+function renderNenkyuPanel(){
+  const fy=getNenkyuFiscalYear();document.getElementById('nk-year-label').textContent=fy;
+  const list=document.getElementById('nk-list');list.innerHTML='';
+  // ヘッダー行（1行のみ）
+  const hdr=document.createElement('div');hdr.className='nk-row';
+  hdr.style.cssText='font-size:10px;font-weight:500;color:var(--text3);background:none;padding:2px 10px;min-height:auto';
+  hdr.innerHTML='<div>氏名</div><div>本年度付与</div><div>前年度繰越</div><div>消化合計／残</div>';
+  list.appendChild(hdr);
+  STAFF.forEach(name=>{
+    const nd=nenkyuData[name]||{grant:0,carry:0};const nk=calcNenkyu(name);
+    const row=document.createElement('div');row.className='nk-row';
+    const cls=nk.remain<0?'c-over':nk.remain<=5?'c-warn':'c-ok';
+    row.innerHTML=`<div class="nk-name">${name.split(' ')[0]}</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="${nd.grant||0}" onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0};nenkyuData['${name}'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="${nd.carry||0}" onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0};nenkyuData['${name}'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status ${cls}">消化${nk.consumed}日 ／ 残${nk.remain}日</div>`;
+    list.appendChild(row);
+  });
+}
+function updateNenkyu(){
+  if(!confirm('有給を更新します。現在の残日数が前年度繰越にセットされます。'))return;
+  STAFF.forEach(name=>{const nk=calcNenkyu(name);if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0};nenkyuData[name].carry=Math.max(0,nk.remain);nenkyuData[name].grant=0;});
+  saveAll();renderNenkyuPanel();alert('繰越を更新しました。本年度付与日数を入力してください。');
+}
+
+/* ══ SEED ══ */
+function seedDemo(){
+  function sw(n,m,d){ensureDay(n,m,d);staffData[n][m][d].wish=true;ensureSchedule(m);schedData[m][n][d-1]='shukyu';}
+  function sl(n,m,d,ng,c){ensureDay(n,m,d);staffData[n][m][d].limit=true;staffData[n][m][d].ng=new Set(ng);staffData[n][m][d].comment=c;}
+  function sk(n,m,d,k){ensureDay(n,m,d);staffData[n][m][d].kibou=k;}
+  sw('横田 崇',5,9);sw('横田 崇',5,16);
+  sw('工藤 哲史',5,5);
+  sl('工藤 哲史',5,8,['tocho','taiki','hayade'],'通院のため午前勤務のみ可');
+  sl('工藤 哲史',5,15,['tocho','taiki'],'保育園行事のため早退予定');
+  sw('髙松 勇佑',5,8);sw('髙松 勇佑',5,22);
+  sl('岩城 くるみ',5,9,['tocho','hayade'],'');
+  sk('平 修一',5,12,'hayade');sk('長瀨 一希',5,19,'taiki');
+  const set=(n,d,k)=>{if(schedData[5]&&schedData[5][n]&&d<=schedData[5][n].length)schedData[5][n][d-1]=k;};
+  set('畠山 智史',7,'tocho');set('畠山 智史',8,'ake');
+  set('横田 崇',1,'tocho');set('横田 崇',2,'ake');
+  set('髙松 勇佑',13,'tocho');set('髙松 勇佑',14,'ake');
+  set('工藤 哲史',8,'nikkn');
+  set('長瀨 一希',20,'tocho');set('長瀨 一希',21,'ake');
+  set('陳祐 綾花',26,'tocho');set('陳祐 綾花',27,'ake');
+  set('岩城 くるみ',2,'ampms');set('平 修一',9,'hayade');
+  set('畠山 智史',9,'taiki');set('横田 崇',3,'taiki');
+  tochoDays[5]=new Set([1,8,15,22,29]);
+  STAFF.forEach((n,i)=>{nenkyuData[n]={grant:20-i,carry:Math.max(0,8-i*2)};});
 }
 
 /* ══ INIT ══ */
 function initAll(){
-  if(!tochoDays[month]) tochoDays[month]=new Set();
-  STAFF.forEach(n=>{
-    if(!staffData[n]) staffData[n]={};
-    if(!nenkyuData[n]) nenkyuData[n]={grant:0,carry:0};
-  });
+  document.getElementById('month-label').textContent=`${year}年 ${month}月`;
+  document.getElementById('logo-text').innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
+  STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0};});
+  if(!tochoDays[month])tochoDays[month]=new Set();
   ensureSchedule(month);
-  document.getElementById('month-label').textContent=year+'年 '+month+'月';
-  const lt=document.getElementById('logo-text');
-  if(lt) lt.innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
-  rebuildStaffSelect();
-  renderStaffCal();renderSummary();renderYkCard();renderICS();
-  renderAdminTbl();renderTochoCal();renderNenkyuPanel();
-  renderShiftList();renderGroupList();renderStaffMgrList();
-  // 設定画面の初期値
-  const ct=document.getElementById('cfg-title');if(ct) ct.value=cfg.title;
-  const ca=document.getElementById('cfg-auto-ake');if(ca) ca.checked=cfg.autoAke!==false;
-  const cw=document.getElementById('cfg-wish-limit');if(cw) cw.value=cfg.wishLimit||6;
-  const cd=document.getElementById('cfg-wish-day-limit');if(cd) cd.value=cfg.wishDayLimit||2;
-  // 週休規定グリッド
-  const mg=document.getElementById('msk-grid');
-  if(mg) mg.innerHTML=Array.from({length:12},(_,i)=>{
-    const mo=i+1;
-    return `<div class="msk-item"><div class="msk-label">${mo}月</div>
-      <input type="number" class="msk-inp" min="0" max="31" value="${shukyuKijun[mo]||8}"
-        onchange="shukyuKijun[${mo}]=parseFloat(this.value)||0;saveAll()">
-      <div style="font-size:9px;color:var(--text3)">日</div></div>`;
-  }).join('');
+  if(icsSelShifts.size===0)['tocho','ake','taiki','hayade'].forEach(k=>icsSelShifts.add(k));
+  if(icsSelMonths.size===0)icsSelMonths.add(month);
+  rebuildStaffSelect();renderStaffCal();renderSummary();renderYkCard();renderICS();
+  document.getElementById('cfg-title').value=cfg.title;
+  document.getElementById('cfg-auto-ake').checked=cfg.autoAke!==false;
+  document.getElementById('cfg-wish-limit').value=cfg.wishLimit||6;
+  document.getElementById('cfg-wish-day-limit').value=cfg.wishDayLimit||2;
 }
 
-window.addEventListener('DOMContentLoaded', ()=>{
-  if(!loadAll()) initAll();
+// Firebase同期が来るまでデモデータで初期表示
+// （ログイン後に_fbStartSync→onValueでFirebaseデータに上書きされる）
+// HTML書き出し版ではkinmuhyo-snapスクリプトがデータを先に設定するためseedDemoをスキップ
+const loaded=loadAll(); // 常にfalseを返す
+if(!loaded && !window._snapLoaded){STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0};});ensureSchedule(month);seedDemo();}
+initAll();
+
+/* ══ レイアウト切り替え ══
+   PC横長  : 2カラムgrid  左[カレンダー→有給→ICS]  右[詳細→登録済み]
+   縦長/SP : 1カラム      [カレンダー→詳細→登録済み→有給→ICS]
+*/
+let _narrowMode=null; // 前回モードキャッシュ
+
+function applyLayoutMode(){
+  const wrap   =document.getElementById('stf-layout-wrap');
+  const colL   =document.getElementById('stf-col-left');
+  const colR   =document.getElementById('stf-col-right');
+  const cal    =document.getElementById('card-cal');
+  const detail =document.getElementById('detail-card');
+  const summary=document.getElementById('card-summary');
+  const nenkyu =document.getElementById('card-nenkyu');
+  const ics    =document.getElementById('card-ics');
+  if(!wrap||!colL||!colR||!cal||!detail||!summary||!nenkyu||!ics)return;
+
+  const narrow = window.innerWidth<=700 || window.innerWidth<=window.innerHeight;
+  if(narrow===_narrowMode)return; // 変化なければ何もしない
+  _narrowMode=narrow;
+
+  if(narrow){
+    /* ── 縦長/SP: 1カラム ──
+       カレンダー → 詳細 → 登録済み → 有給 → ICS
+       wrap を block、colRを非表示にしてcolLに全カードを順番に入れる */
+    wrap.style.cssText='display:block';
+    colR.style.display='none';
+    // colL に順序通り appendChild（既に子なら移動）
+    colL.style.cssText='display:flex;flex-direction:column;gap:12px;width:100%';
+    colL.appendChild(cal);
+    colL.appendChild(detail);
+    colL.appendChild(summary);
+    colL.appendChild(nenkyu);
+    colL.appendChild(ics);
+  } else {
+    /* ── PC横長: 2カラムgrid ──
+       左[カレンダー→有給→ICS]  右[詳細→登録済み] */
+    wrap.style.cssText='display:grid;grid-template-columns:1fr 310px;gap:14px;align-items:start';
+    colR.style.display='';
+    colL.style.cssText='display:flex;flex-direction:column;gap:12px';
+    colR.style.cssText='display:flex;flex-direction:column;gap:12px';
+    colL.appendChild(cal);
+    colL.appendChild(nenkyu);
+    colL.appendChild(ics);
+    colR.appendChild(detail);
+    colR.appendChild(summary);
+  }
+}
+window.addEventListener('resize',applyLayoutMode);
+window.addEventListener('orientationchange',()=>setTimeout(applyLayoutMode,150));
+applyLayoutMode();
+
+// ページ離脱前に未送信の保存をフラッシュ（問題２対策）
+window.addEventListener('beforeunload', () => {
+  if(window._lastPayload && typeof window._fbSaveImmediate === 'function'){
+    window._fbSaveImmediate(window._lastPayload);
+  }
 });
 </script>
 </body>
