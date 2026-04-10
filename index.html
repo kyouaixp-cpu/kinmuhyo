@@ -9,7 +9,7 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-  import { getDatabase, ref, set, get, onValue }
+  import { getDatabase, ref, set, onValue }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
   const firebaseConfig = {
@@ -28,7 +28,6 @@
   const provider = new GoogleAuthProvider();
 
   // ── Googleログイン ──
-  // Safari/iOS はポップアップをブロックするため signInWithRedirect を使う
   const _isSafariOrIOS = /iP(hone|ad|od)/.test(navigator.userAgent)
     || (/Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent));
 
@@ -36,15 +35,12 @@
     try {
       provider.setCustomParameters({ prompt: 'select_account' });
       if(_isSafariOrIOS){
-        // Safari/iOS: リダイレクト方式（ポップアップ不可）
         await signInWithRedirect(auth, provider);
       } else {
-        // その他: ポップアップ方式
         await signInWithPopup(auth, provider);
       }
     } catch(e) {
       if(e.code === 'auth/popup-blocked'){
-        // ポップアップがブロックされた場合はリダイレクトにフォールバック
         try { await signInWithRedirect(auth, provider); } catch(e2) {
           alert('ログインに失敗しました: ' + e2.message);
         }
@@ -54,7 +50,6 @@
     }
   };
 
-  // リダイレクトログイン後の結果を処理（ページ再読み込み時に自動実行）
   getRedirectResult(auth).catch(e => {
     if(e && e.code !== 'auth/no-redirect-result'){
       console.warn('リダイレクトログイン結果エラー:', e.code);
@@ -65,87 +60,58 @@
     if(confirm('ログアウトしますか？')) await signOut(auth);
   };
 
-  // ── Firebase 保存／同期（分割パス方式） ──
+  // ══════════════════════════════════════════
+  // Firebase 保存／同期
   //
-  // 【設計方針】データをパスで分割し「自分が書くパス」と「他者が書くパスを読む」を分離
+  // 方針：1パス kinmuhyo/shared に全データを set() する（シンプル・確実）
   //
-  //   kinmuhyo/shared/meta        … cfg / STAFF / SHIFTS / GROUPS / shukyuKijun / tochoDays / year / month
-  //   kinmuhyo/shared/sched       … schedData（管理者が書く・全員読む）
-  //   kinmuhyo/shared/nenkyu      … nenkyuData（管理者が書く・全員読む）
-  //   kinmuhyo/shared/staff/{name} … 各スタッフの staffData[name]（本人だけが書く）
+  // 「自己コールバック問題」の解決：
+  //   Firebase SDK は set() 完了後に onValue を発火させる。
+  //   これが「自分の書き込み」か「他端末の書き込み」かを区別するため
+  //   _writeCount（書き込み予約カウンタ）を使う。
   //
-  // この分割により：
-  //   - スタッフAの希望入力がスタッフBやスタッフCの操作で上書きされない
-  //   - onValue で受け取るのは「他者が変更したパスの通知」だけになる
-  //   - 自分が書いたパスへの即時コールバックは _skipOwn で1回スキップ
+  //   saveAll() → _fbSave() → カウンタ++ → 300ms後 set() 実行
+  //   onValue 発火時 → カウンタ > 0 なら自己コールバックとみなしカウンタ-- してスキップ
+  //   カウンタ = 0 なら他端末からの更新 → アプリに反映して再描画
+  // ══════════════════════════════════════════
 
-  // 書き込んだパスの即時コールバックをスキップするカウンタ（パスごと）
-  const _skipOwn = { meta: 0, sched: 0, nenkyu: 0, staff: {} };
+  let _writeCount = 0;   // 実際にset()を呼んだ回数（onValueスキップ用）
   let _saveTimer = null;
-  let _pendingPayload = null;
+  let _latestPayload = null;
 
-  // ── パス別保存ヘルパー ──
-  async function _fbSetPath(path, data, skipKey, skipName) {
-    if(skipName){
-      _skipOwn.staff[skipName] = (_skipOwn.staff[skipName]||0) + 1;
-    } else if(skipKey){
-      _skipOwn[skipKey] = (_skipOwn[skipKey]||0) + 1;
-    }
-    try {
-      await set(ref(db, path), data);
-    } catch(e) {
-      if(skipName) _skipOwn.staff[skipName] = Math.max(0, (_skipOwn.staff[skipName]||1)-1);
-      else if(skipKey) _skipOwn[skipKey] = Math.max(0, (_skipOwn[skipKey]||1)-1);
-      console.error('Firebase保存エラー(' + path + '):', e);
-    }
-  }
-
-  // ── メイン保存関数（デバウンス付き） ──
   window._fbSave = (payload) => {
-    const uid = auth.currentUser?.uid;
-    if(!uid) return;
-    _pendingPayload = payload;
+    if(!auth.currentUser) return;
+    // 常に最新ペイロードを保持（デバウンス中に古いデータが送られるのを防ぐ）
+    _latestPayload = payload;
     if(_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(async () => {
       _saveTimer = null;
       if(!auth.currentUser) return;
-      const p = _pendingPayload;
-      _pendingPayload = null;
-
-      // ① meta（全体設定）を保存
-      const meta = {
-        cfg: p.cfg, STAFF: p.STAFF, SHIFTS: p.SHIFTS, GROUPS: p.GROUPS,
-        shukyuKijun: p.shukyuKijun, tochoDays: p.tochoDays, year: p.year, month: p.month
-      };
-      await _fbSetPath('kinmuhyo/shared/meta', meta, 'meta');
-
-      // ② schedData を保存（管理者操作用）
-      await _fbSetPath('kinmuhyo/shared/sched', p.schedData || {}, 'sched');
-
-      // ③ nenkyuData を保存
-      await _fbSetPath('kinmuhyo/shared/nenkyu', p.nenkyuData || {}, 'nenkyu');
-
-      // ④ staffData を各スタッフごとに個別パスで保存
-      //    ※ 自分（ログインユーザー）が変更したスタッフ分だけ書く
-      if(p.staffData){
-        const saves = Object.entries(p.staffData).map(([name, data]) =>
-          _fbSetPath('kinmuhyo/shared/staff/' + encodeURIComponent(name), data, null, name)
-        );
-        await Promise.all(saves);
+      // set()を実際に呼ぶ直前に1回だけカウントアップ
+      _writeCount++;
+      try {
+        await set(ref(db, 'kinmuhyo/shared'), _latestPayload);
+      } catch(e) {
+        _writeCount = Math.max(0, _writeCount-1);
+        console.error('Firebase保存エラー:', e);
       }
     }, 300);
   };
 
-  // ── リアルタイム同期（パス別リスナー） ──
+  // ── リアルタイム同期 ──
   let _fbListenerAttached = false;
   window._fbStartSync = () => {
     if(_fbListenerAttached) return;
     _fbListenerAttached = true;
 
-    // meta リスナー
-    onValue(ref(db, 'kinmuhyo/shared/meta'), (snapshot) => {
-      if(_skipOwn.meta > 0){ _skipOwn.meta--; return; }
-      if(_saveTimer !== null) return;
+    onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
+      // 自己コールバック判定：カウンタが残っていれば自分の書き込み由来
+      if(_writeCount > 0){
+        _writeCount--;
+        return;
+      }
+
+      // 他端末からの更新 → アプリに反映
       const data = snapshot.val();
       if(!data) return;
       try {
@@ -158,102 +124,52 @@
           tochoDays = {};
           Object.entries(data.tochoDays).forEach(([m,a]) => { tochoDays[m] = new Set(a); });
         }
+        if(data.nenkyuData) nenkyuData = data.nenkyuData;
+        if(data.schedData) schedData = data.schedData;
         if(data.year) year = data.year;
         if(data.month) month = data.month;
-        _redrawAfterSync();
-      } catch(e){ console.error('meta同期エラー:', e); }
-    });
-
-    // sched リスナー
-    onValue(ref(db, 'kinmuhyo/shared/sched'), (snapshot) => {
-      if(_skipOwn.sched > 0){ _skipOwn.sched--; return; }
-      if(_saveTimer !== null) return;
-      const data = snapshot.val();
-      if(data) schedData = data;
-      _redrawAfterSync();
-    });
-
-    // nenkyu リスナー
-    onValue(ref(db, 'kinmuhyo/shared/nenkyu'), (snapshot) => {
-      if(_skipOwn.nenkyu > 0){ _skipOwn.nenkyu--; return; }
-      if(_saveTimer !== null) return;
-      const data = snapshot.val();
-      if(data) nenkyuData = data;
-      _redrawAfterSync();
-    });
-
-    // staff リスナー（スタッフ全体をまとめて監視）
-    onValue(ref(db, 'kinmuhyo/shared/staff'), (snapshot) => {
-      if(_saveTimer !== null) return;
-      const data = snapshot.val();
-      if(!data) return;
-      try {
-        Object.entries(data).forEach(([encodedName, mv]) => {
-          const name = decodeURIComponent(encodedName);
-          // 自分が書いた直後のコールバックはスキップ
-          if((_skipOwn.staff[name]||0) > 0){ _skipOwn.staff[name]--; return; }
-          // picker操作中・日付選択中のスタッフ本人のデータは上書きしない
-          const pickerOpen = document.getElementById('pk-overlay')?.style.display === 'flex';
-          const isCurrentStaff = (name === (typeof currentStaff !== 'undefined' ? currentStaff : ''));
-          const staffInteracting = isCurrentStaff && (
-            (typeof selectedDay !== 'undefined' && selectedDay !== null) || pickerOpen
-          );
-          if(staffInteracting) return;
-          // staffData に反映（Setを復元）
-          if(!staffData) staffData = {};
-          staffData[name] = {};
-          if(mv){
-            Object.entries(mv).forEach(([mo, dv]) => {
-              staffData[name][mo] = {};
-              if(dv){
-                Object.entries(dv).forEach(([d, v]) => {
-                  staffData[name][mo][d] = {...v, ng: new Set(v.ng||[])};
-                });
-              }
+        if(data.staffData){
+          staffData = {};
+          Object.entries(data.staffData).forEach(([n,mv]) => {
+            staffData[n] = {};
+            Object.entries(mv).forEach(([mo,dv]) => {
+              staffData[n][mo] = {};
+              Object.entries(dv).forEach(([d,v]) => {
+                staffData[n][mo][d] = {...v, ng: new Set(v.ng||[])};
+              });
             });
-          }
-        });
-        _redrawAfterSync();
-      } catch(e){ console.error('staff同期エラー:', e); }
+          });
+        }
+        // 再描画
+        if(typeof rebuildStaffSelect === 'function'){
+          document.getElementById('month-label').textContent = year+'年 '+month+'月';
+          const lt = document.getElementById('logo-text');
+          if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
+          STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0}; });
+          if(!tochoDays[month]) tochoDays[month] = new Set();
+          ensureSchedule(month);
+          rebuildStaffSelect();
+          renderStaffCal(); renderSummary(); renderYkCard(); renderICS();
+          const ct=document.getElementById('cfg-title'); if(ct) ct.value=cfg.title;
+          const ca=document.getElementById('cfg-auto-ake'); if(ca) ca.checked=cfg.autoAke!==false;
+          const cw=document.getElementById('cfg-wish-limit'); if(cw) cw.value=cfg.wishLimit||6;
+          const cd=document.getElementById('cfg-wish-day-limit'); if(cd) cd.value=cfg.wishDayLimit||2;
+          const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
+          if(adminActive){ ensureSchedule(month); renderAdmin(); }
+        }
+      } catch(e) { console.error('データ反映エラー:', e); }
     });
   };
 
-  // 同期後の再描画（共通処理）
-  function _redrawAfterSync(){
-    if(typeof rebuildStaffSelect !== 'function') return;
-    try {
-      document.getElementById('month-label').textContent = year+'年 '+month+'月';
-      const lt = document.getElementById('logo-text');
-      if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
-      STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0}; });
-      if(!tochoDays[month]) tochoDays[month] = new Set();
-      ensureSchedule(month);
-      rebuildStaffSelect();
-      renderStaffCal(); renderSummary(); renderYkCard(); renderICS();
-      const ct=document.getElementById('cfg-title'); if(ct) ct.value=cfg.title;
-      const ca=document.getElementById('cfg-auto-ake'); if(ca) ca.checked=cfg.autoAke!==false;
-      const cw=document.getElementById('cfg-wish-limit'); if(cw) cw.value=cfg.wishLimit||6;
-      const cd=document.getElementById('cfg-wish-day-limit'); if(cd) cd.value=cfg.wishDayLimit||2;
-      const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
-      if(adminActive){ ensureSchedule(month); renderAdmin(); }
-    } catch(e){ console.error('再描画エラー:', e); }
-  }
-
-  // 即時保存（beforeunload時用・デバウンスなし）
+  // 即時保存（beforeunload用）
   window._fbSaveImmediate = async (payload) => {
     if(!auth.currentUser) return;
-    const meta = {
-      cfg: payload.cfg, STAFF: payload.STAFF, SHIFTS: payload.SHIFTS, GROUPS: payload.GROUPS,
-      shukyuKijun: payload.shukyuKijun, tochoDays: payload.tochoDays, year: payload.year, month: payload.month
-    };
-    await Promise.all([
-      _fbSetPath('kinmuhyo/shared/meta', meta, 'meta'),
-      _fbSetPath('kinmuhyo/shared/sched', payload.schedData||{}, 'sched'),
-      _fbSetPath('kinmuhyo/shared/nenkyu', payload.nenkyuData||{}, 'nenkyu'),
-      ...Object.entries(payload.staffData||{}).map(([name, data]) =>
-        _fbSetPath('kinmuhyo/shared/staff/'+encodeURIComponent(name), data, null, name)
-      )
-    ]);
+    _writeCount++;
+    try {
+      await set(ref(db, 'kinmuhyo/shared'), payload);
+    } catch(e) {
+      _writeCount = Math.max(0, _writeCount-1);
+    }
   };
 
   // ── 認証状態の監視 ──
@@ -275,6 +191,7 @@
     }
   });
 </script>
+
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=DM+Mono:wght@400;500&display=swap');
 :root{
