@@ -63,39 +63,30 @@
   // ══════════════════════════════════════════
   // Firebase 保存／同期
   //
-  // 方針：1パス kinmuhyo/shared に全データを set() する（シンプル・確実）
-  //
-  // 「自己コールバック問題」の解決：
-  //   Firebase SDK は set() 完了後に onValue を発火させる。
-  //   これが「自分の書き込み」か「他端末の書き込み」かを区別するため
-  //   _writeCount（書き込み予約カウンタ）を使う。
-  //
-  //   saveAll() → _fbSave() → カウンタ++ → 300ms後 set() 実行
-  //   onValue 発火時 → カウンタ > 0 なら自己コールバックとみなしカウンタ-- してスキップ
-  //   カウンタ = 0 なら他端末からの更新 → アプリに反映して再描画
+  // 方針：onValueは常に受け取る。スキップしない。
+  //   - set()後に自分のonValueが来ても、すでにアプリ内データは最新なので
+  //     restoreFromData()で上書きしても問題ない（同じデータで上書き）
+  //   - 再描画も毎回行う（Googleスプレッドシートと同じ動作）
+  //   - デバウンスで連続操作をまとめて送信
   // ══════════════════════════════════════════
 
-  let _writeCount = 0;   // 実際にset()を呼んだ回数（onValueスキップ用）
   let _saveTimer = null;
   let _latestPayload = null;
 
   window._fbSave = (payload) => {
     if(!auth.currentUser) return;
-    // 常に最新ペイロードを保持（デバウンス中に古いデータが送られるのを防ぐ）
     _latestPayload = payload;
     if(_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(async () => {
       _saveTimer = null;
       if(!auth.currentUser) return;
-      // set()を実際に呼ぶ直前に1回だけカウントアップ
-      _writeCount++;
       try {
         await set(ref(db, 'kinmuhyo/shared'), _latestPayload);
       } catch(e) {
-        _writeCount = Math.max(0, _writeCount-1);
         console.error('Firebase保存エラー:', e);
+        alert('保存に失敗しました。通信状況を確認してください。');
       }
-    }, 300);
+    }, 500);
   };
 
   // ── リアルタイム同期 ──
@@ -105,15 +96,13 @@
     _fbListenerAttached = true;
 
     onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
-      // 自己コールバック判定：カウンタが残っていれば自分の書き込み由来
-      if(_writeCount > 0){
-        _writeCount--;
-        return;
-      }
-
-      // 他端末からの更新 → アプリに反映
       const data = snapshot.val();
       if(!data) return;
+
+      // デバウンス送信中（自分がまもなく上書きする）はUIだけスキップ
+      // データ自体は受け取らない（古いデータで自分の変更が消えるのを防ぐ）
+      if(_saveTimer !== null) return;
+
       try {
         if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
         // 再描画
@@ -140,11 +129,10 @@
   // 即時保存（beforeunload用）
   window._fbSaveImmediate = async (payload) => {
     if(!auth.currentUser) return;
-    _writeCount++;
     try {
       await set(ref(db, 'kinmuhyo/shared'), payload);
     } catch(e) {
-      _writeCount = Math.max(0, _writeCount-1);
+      console.error('Firebase即時保存エラー:', e);
     }
   };
 
@@ -815,12 +803,19 @@ window.restoreFromData = restoreFromData;
 
 /* ══ SAVE / LOAD (Firebase) ══ */
 function saveAll(){
-  const payload={cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
-    tochoDays:serializeTochoDays(),
-    staffData:serializeStaffData(staffData),
-    schedData:serializeSchedData(schedData),
-    nenkyuData:JSON.parse(JSON.stringify(nenkyuData)),
-    year,month};
+  // 完全なディープコピーでpayloadを作成（デバウンス中の参照変更を防ぐ）
+  const payload={
+    cfg: JSON.parse(JSON.stringify(cfg)),
+    STAFF: [...STAFF],
+    SHIFTS: JSON.parse(JSON.stringify(SHIFTS)),
+    GROUPS: JSON.parse(JSON.stringify(GROUPS)),
+    shukyuKijun: JSON.parse(JSON.stringify(shukyuKijun)),
+    tochoDays: serializeTochoDays(),
+    staffData: serializeStaffData(staffData),
+    schedData: serializeSchedData(schedData),
+    nenkyuData: JSON.parse(JSON.stringify(nenkyuData)),
+    year, month
+  };
   if(typeof window._fbSave==='function') window._fbSave(payload);
   window._lastPayload = payload;
 }
