@@ -105,9 +105,8 @@
 
       try {
         if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
-        // 再描画
+        // 再描画（month-labelは各端末の表示月を維持）
         if(typeof rebuildStaffSelect === 'function'){
-          document.getElementById('month-label').textContent = year+'年 '+month+'月';
           const lt = document.getElementById('logo-text');
           if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
           STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0}; });
@@ -760,7 +759,7 @@ function serializeSchedData(sd){
 }
 
 // Firebaseやスナップショットから受け取ったデータを復元する共通関数
-// キーが文字列になっているものを数値に変換する
+// ※ year・month は各端末のUI状態のため同期しない
 function restoreFromData(data){
   if(data.cfg) cfg=data.cfg;
   if(data.STAFF) STAFF=data.STAFF;
@@ -784,8 +783,7 @@ function restoreFromData(data){
       });
     });
   }
-  if(data.year) year=+data.year;
-  if(data.month) month=+data.month;
+  // year・month はFirebaseから受け取らない（各端末が独自に表示月を管理）
   if(data.staffData){
     staffData={};
     Object.entries(data.staffData).forEach(([n,mv])=>{
@@ -803,7 +801,7 @@ window.restoreFromData = restoreFromData;
 
 /* ══ SAVE / LOAD (Firebase) ══ */
 function saveAll(){
-  // 完全なディープコピーでpayloadを作成（デバウンス中の参照変更を防ぐ）
+  // year・monthは各端末のUI状態のためpayloadに含めない
   const payload={
     cfg: JSON.parse(JSON.stringify(cfg)),
     STAFF: [...STAFF],
@@ -813,8 +811,7 @@ function saveAll(){
     tochoDays: serializeTochoDays(),
     staffData: serializeStaffData(staffData),
     schedData: serializeSchedData(schedData),
-    nenkyuData: JSON.parse(JSON.stringify(nenkyuData)),
-    year, month
+    nenkyuData: JSON.parse(JSON.stringify(nenkyuData))
   };
   if(typeof window._fbSave==='function') window._fbSave(payload);
   window._lastPayload = payload;
@@ -853,8 +850,6 @@ function exportHtml(){
       if(_snap.tochoDays){tochoDays={};Object.entries(_snap.tochoDays).forEach(([m,a])=>{tochoDays[+m]=new Set(a);});}
       if(_snap.nenkyuData)nenkyuData=_snap.nenkyuData;
       if(_snap.schedData){schedData={};Object.entries(_snap.schedData).forEach(([m,mv])=>{schedData[+m]={};if(mv)Object.entries(mv).forEach(([n,a])=>{schedData[+m][n]=Array.isArray(a)?a:[];});});}
-      if(_snap.year)year=+_snap.year;
-      if(_snap.month)month=+_snap.month;
       if(_snap.staffData){staffData={};Object.entries(_snap.staffData).forEach(([n,mv])=>{staffData[n]={};if(mv)Object.entries(mv).forEach(([mo,dv])=>{staffData[n][+mo]={};if(dv)Object.entries(dv).forEach(([d,v])=>{staffData[n][+mo][+d]={...v,ng:new Set(v.ng||[])};});});});}
     }
     if(typeof initAll==='function')initAll();
