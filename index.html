@@ -81,18 +81,20 @@
 
   window._fbSave = (payload) => {
     if(!auth.currentUser) return;
-    // 常に最新ペイロードを保持（デバウンス中に古いデータが送られるのを防ぐ）
     _latestPayload = payload;
     if(_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(async () => {
       _saveTimer = null;
       if(!auth.currentUser) return;
-      // set()を実際に呼ぶ直前に1回だけカウントアップ
       _writeCount++;
+      const ts = new Date().toLocaleTimeString('ja-JP',{hour12:false});
+      window._dbgLog(`[${ts}] 📤 set()送信 _writeCount=${_writeCount}`);
       try {
         await set(ref(db, 'kinmuhyo/shared'), _latestPayload);
+        window._dbgLog(`[${ts}] ✅ set()完了`);
       } catch(e) {
         _writeCount = Math.max(0, _writeCount-1);
+        window._dbgLog(`[${ts}] ❌ set()失敗: ${e.message}`);
         console.error('Firebase保存エラー:', e);
       }
     }, 300);
@@ -105,13 +107,13 @@
     _fbListenerAttached = true;
 
     onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
-      // 自己コールバック判定：カウンタが残っていれば自分の書き込み由来
+      const ts = new Date().toLocaleTimeString('ja-JP',{hour12:false});
       if(_writeCount > 0){
+        window._dbgLog(`[${ts}] 🔄 onValue(自己) スキップ _writeCount=${_writeCount}→${_writeCount-1}`);
         _writeCount--;
         return;
       }
-
-      // 他端末からの更新 → アプリに反映
+      window._dbgLog(`[${ts}] 📥 onValue(他端末) 受信 → 再描画`);
       const data = snapshot.val();
       if(!data) return;
       try {
@@ -454,6 +456,26 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
 <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 </head>
 <body>
+
+<!-- デバッグパネル -->
+<div id="dbg-panel" style="position:fixed;bottom:0;left:0;right:0;max-height:160px;overflow-y:auto;background:rgba(0,0,0,0.85);color:#0f0;font-size:11px;font-family:monospace;padding:6px 10px;z-index:99999;line-height:1.6">
+  <div style="color:#ff0;font-weight:bold;margin-bottom:4px">🔍 Firebase デバッグログ（確認後に削除）
+    <button onclick="document.getElementById('dbg-panel').style.display='none'" style="margin-left:10px;font-size:10px;padding:1px 6px">閉じる</button>
+    <button onclick="document.getElementById('dbg-log').innerHTML=''" style="margin-left:4px;font-size:10px;padding:1px 6px">クリア</button>
+  </div>
+  <div id="dbg-log"></div>
+</div>
+<script>
+window._dbgLog = function(msg){
+  const el = document.getElementById('dbg-log');
+  if(!el) return;
+  const line = document.createElement('div');
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+  console.log(msg);
+};
+</script>
 
 <!-- ログインオーバーレイ -->
 <div id="login-overlay" style="position:fixed;inset:0;background:rgba(245,244,240,0.97);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px">
