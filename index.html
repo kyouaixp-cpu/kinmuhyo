@@ -81,20 +81,18 @@
 
   window._fbSave = (payload) => {
     if(!auth.currentUser) return;
+    // 常に最新ペイロードを保持（デバウンス中に古いデータが送られるのを防ぐ）
     _latestPayload = payload;
     if(_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(async () => {
       _saveTimer = null;
       if(!auth.currentUser) return;
+      // set()を実際に呼ぶ直前に1回だけカウントアップ
       _writeCount++;
-      const ts = new Date().toLocaleTimeString('ja-JP',{hour12:false});
-      window._dbgLog(`[${ts}] 📤 set()送信 _writeCount=${_writeCount}`);
       try {
         await set(ref(db, 'kinmuhyo/shared'), _latestPayload);
-        window._dbgLog(`[${ts}] ✅ set()完了`);
       } catch(e) {
         _writeCount = Math.max(0, _writeCount-1);
-        window._dbgLog(`[${ts}] ❌ set()失敗: ${e.message}`);
         console.error('Firebase保存エラー:', e);
       }
     }, 300);
@@ -107,41 +105,17 @@
     _fbListenerAttached = true;
 
     onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
-      const ts = new Date().toLocaleTimeString('ja-JP',{hour12:false});
+      // 自己コールバック判定：カウンタが残っていれば自分の書き込み由来
       if(_writeCount > 0){
-        window._dbgLog(`[${ts}] 🔄 onValue(自己) スキップ _writeCount=${_writeCount}→${_writeCount-1}`);
         _writeCount--;
         return;
       }
-      window._dbgLog(`[${ts}] 📥 onValue(他端末) 受信 → 再描画`);
+
+      // 他端末からの更新 → アプリに反映
       const data = snapshot.val();
       if(!data) return;
       try {
-        if(data.cfg) cfg = data.cfg;
-        if(data.STAFF) STAFF = data.STAFF;
-        if(data.SHIFTS) SHIFTS = data.SHIFTS;
-        if(data.GROUPS) GROUPS = data.GROUPS;
-        if(data.shukyuKijun) shukyuKijun = data.shukyuKijun;
-        if(data.tochoDays){
-          tochoDays = {};
-          Object.entries(data.tochoDays).forEach(([m,a]) => { tochoDays[m] = new Set(a); });
-        }
-        if(data.nenkyuData) nenkyuData = data.nenkyuData;
-        if(data.schedData) schedData = data.schedData;
-        if(data.year) year = data.year;
-        if(data.month) month = data.month;
-        if(data.staffData){
-          staffData = {};
-          Object.entries(data.staffData).forEach(([n,mv]) => {
-            staffData[n] = {};
-            Object.entries(mv).forEach(([mo,dv]) => {
-              staffData[n][mo] = {};
-              Object.entries(dv).forEach(([d,v]) => {
-                staffData[n][mo][d] = {...v, ng: new Set(v.ng||[])};
-              });
-            });
-          });
-        }
+        if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
         // 再描画
         if(typeof rebuildStaffSelect === 'function'){
           document.getElementById('month-label').textContent = year+'年 '+month+'月';
@@ -456,26 +430,6 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
 <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 </head>
 <body>
-
-<!-- デバッグパネル -->
-<div id="dbg-panel" style="position:fixed;bottom:0;left:0;right:0;max-height:160px;overflow-y:auto;background:rgba(0,0,0,0.85);color:#0f0;font-size:11px;font-family:monospace;padding:6px 10px;z-index:99999;line-height:1.6">
-  <div style="color:#ff0;font-weight:bold;margin-bottom:4px">🔍 Firebase デバッグログ（確認後に削除）
-    <button onclick="document.getElementById('dbg-panel').style.display='none'" style="margin-left:10px;font-size:10px;padding:1px 6px">閉じる</button>
-    <button onclick="document.getElementById('dbg-log').innerHTML=''" style="margin-left:4px;font-size:10px;padding:1px 6px">クリア</button>
-  </div>
-  <div id="dbg-log"></div>
-</div>
-<script>
-window._dbgLog = function(msg){
-  const el = document.getElementById('dbg-log');
-  if(!el) return;
-  const line = document.createElement('div');
-  line.textContent = msg;
-  el.appendChild(line);
-  el.scrollTop = el.scrollHeight;
-  console.log(msg);
-};
-</script>
 
 <!-- ログインオーバーレイ -->
 <div id="login-overlay" style="position:fixed;inset:0;background:rgba(245,244,240,0.97);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px">
@@ -808,9 +762,7 @@ function serializeStaffData(sd){
 function serializeTochoDays(){
   const out={};Object.entries(tochoDays).forEach(([m,s])=>{out[m]=[...(s||[])];});return out;
 }
-
 function serializeSchedData(sd){
-  // schedDataをディープコピー（参照渡し防止）
   const out={};
   Object.entries(sd).forEach(([m,mv])=>{
     out[m]={};
@@ -818,6 +770,48 @@ function serializeSchedData(sd){
   });
   return out;
 }
+
+// Firebaseやスナップショットから受け取ったデータを復元する共通関数
+// キーが文字列になっているものを数値に変換する
+function restoreFromData(data){
+  if(data.cfg) cfg=data.cfg;
+  if(data.STAFF) STAFF=data.STAFF;
+  if(data.SHIFTS) SHIFTS=data.SHIFTS;
+  if(data.GROUPS) GROUPS=data.GROUPS;
+  if(data.shukyuKijun){
+    shukyuKijun={};
+    Object.entries(data.shukyuKijun).forEach(([m,v])=>{shukyuKijun[+m]=v;});
+  }
+  if(data.tochoDays){
+    tochoDays={};
+    Object.entries(data.tochoDays).forEach(([m,a])=>{tochoDays[+m]=new Set(a);});
+  }
+  if(data.nenkyuData) nenkyuData=data.nenkyuData;
+  if(data.schedData){
+    schedData={};
+    Object.entries(data.schedData).forEach(([m,mv])=>{
+      schedData[+m]={};
+      if(mv) Object.entries(mv).forEach(([name,arr])=>{
+        schedData[+m][name]=Array.isArray(arr)?arr:[];
+      });
+    });
+  }
+  if(data.year) year=+data.year;
+  if(data.month) month=+data.month;
+  if(data.staffData){
+    staffData={};
+    Object.entries(data.staffData).forEach(([n,mv])=>{
+      staffData[n]={};
+      if(mv) Object.entries(mv).forEach(([mo,dv])=>{
+        staffData[n][+mo]={};
+        if(dv) Object.entries(dv).forEach(([d,v])=>{
+          staffData[n][+mo][+d]={...v,ng:new Set(v.ng||[])};
+        });
+      });
+    });
+  }
+}
+window.restoreFromData = restoreFromData;
 
 /* ══ SAVE / LOAD (Firebase) ══ */
 function saveAll(){
@@ -852,17 +846,22 @@ function exportHtml(){
   try{
     const _snap=${snapshot};
     window._snapLoaded=true;
-    if(_snap.cfg)cfg=_snap.cfg;
-    if(_snap.STAFF)STAFF=_snap.STAFF;
-    if(_snap.SHIFTS)SHIFTS=_snap.SHIFTS;
-    if(_snap.GROUPS)GROUPS=_snap.GROUPS;
-    if(_snap.shukyuKijun)shukyuKijun=_snap.shukyuKijun;
-    if(_snap.tochoDays){tochoDays={};Object.entries(_snap.tochoDays).forEach(([m,a])=>{tochoDays[m]=new Set(a);});}
-    if(_snap.nenkyuData)nenkyuData=_snap.nenkyuData;
-    if(_snap.schedData)schedData=_snap.schedData;
-    if(_snap.year)year=_snap.year;
-    if(_snap.month)month=_snap.month;
-    if(_snap.staffData){staffData={};Object.entries(_snap.staffData).forEach(([n,mv])=>{staffData[n]={};Object.entries(mv).forEach(([mo,dv])=>{staffData[n][mo]={};Object.entries(dv).forEach(([d,v])=>{staffData[n][mo][d]={...v,ng:new Set(v.ng||[])};});});});}
+    if(typeof restoreFromData==='function'){
+      restoreFromData(_snap);
+    } else {
+      // フォールバック（restoreFromDataが未定義の場合）
+      if(_snap.cfg)cfg=_snap.cfg;
+      if(_snap.STAFF)STAFF=_snap.STAFF;
+      if(_snap.SHIFTS)SHIFTS=_snap.SHIFTS;
+      if(_snap.GROUPS)GROUPS=_snap.GROUPS;
+      if(_snap.shukyuKijun){shukyuKijun={};Object.entries(_snap.shukyuKijun).forEach(([m,v])=>{shukyuKijun[+m]=v;});}
+      if(_snap.tochoDays){tochoDays={};Object.entries(_snap.tochoDays).forEach(([m,a])=>{tochoDays[+m]=new Set(a);});}
+      if(_snap.nenkyuData)nenkyuData=_snap.nenkyuData;
+      if(_snap.schedData){schedData={};Object.entries(_snap.schedData).forEach(([m,mv])=>{schedData[+m]={};if(mv)Object.entries(mv).forEach(([n,a])=>{schedData[+m][n]=Array.isArray(a)?a:[];});});}
+      if(_snap.year)year=+_snap.year;
+      if(_snap.month)month=+_snap.month;
+      if(_snap.staffData){staffData={};Object.entries(_snap.staffData).forEach(([n,mv])=>{staffData[n]={};if(mv)Object.entries(mv).forEach(([mo,dv])=>{staffData[n][+mo]={};if(dv)Object.entries(dv).forEach(([d,v])=>{staffData[n][+mo][+d]={...v,ng:new Set(v.ng||[])};});});});}
+    }
     if(typeof initAll==='function')initAll();
   }catch(e){console.error('スナップショット復元エラー:',e);}
 })();
@@ -907,12 +906,7 @@ function importData(e){
   reader.onload=ev=>{
     try{
       const data=JSON.parse(ev.target.result);
-      if(data.cfg)cfg=data.cfg;if(data.STAFF)STAFF=data.STAFF;if(data.SHIFTS)SHIFTS=data.SHIFTS;
-      if(data.GROUPS)GROUPS=data.GROUPS;if(data.shukyuKijun)shukyuKijun=data.shukyuKijun;
-      if(data.tochoDays){tochoDays={};Object.entries(data.tochoDays).forEach(([m,a])=>{tochoDays[m]=new Set(a);});}
-      if(data.nenkyuData)nenkyuData=data.nenkyuData;if(data.schedData)schedData=data.schedData;
-      if(data.year)year=data.year;if(data.month)month=data.month;
-      if(data.staffData){staffData={};Object.entries(data.staffData).forEach(([n,mv])=>{staffData[n]={};Object.entries(mv).forEach(([mo,dv])=>{staffData[n][mo]={};Object.entries(dv).forEach(([d,v])=>{staffData[n][mo][d]={...v,ng:new Set(v.ng||[])};});});});}
+      restoreFromData(data);
       saveAll();initAll();alert('データを読み込みました');
     }catch(err){alert('読み込みに失敗しました');}
   };
