@@ -7,7 +7,7 @@
 <!-- Firebase SDK -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
   import { getDatabase, ref, set, onValue }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
@@ -28,37 +28,24 @@
   const provider = new GoogleAuthProvider();
 
   // ── Googleログイン ──
-  // iOSのSafariはITP（Intelligent Tracking Prevention）により
-  // クロスサイトのsignInWithRedirectがブロックされる。
-  // signInWithPopupを同期的に呼ぶことでSafariのポップアップ許可を得る。
-  // （async/awaitを使うとタップとの紐付けが切れてブロックされる）
-
-  window._fbSignIn = () => {
-    provider.setCustomParameters({ prompt: 'select_account' });
-    // 同期的にpopupを開く（iOSのユーザー操作判定を通過するため）
-    signInWithPopup(auth, provider).catch(e => {
-      if(e.code === 'auth/popup-blocked' || e.code === 'auth/popup-closed-by-user'){
-        // ポップアップがブロックされた場合のみリダイレクトへフォールバック
-        if(e.code === 'auth/popup-blocked'){
-          alert('ポップアップがブロックされています。\nSafari設定でポップアップを許可するか、\nホーム画面に追加してから開いてください。');
-        }
+  // Safari/iOSでは signInWithRedirect は ITP（クロスサイトcookie制限）により
+  // GitHub Pages等のサードパーティドメインでは動作しない。
+  // signInWithPopup に統一し、ポップアップが許可されていれば全環境で動作する。
+  window._fbSignIn = async () => {
+    try {
+      provider.setCustomParameters({ prompt: 'select_account' });
+      await signInWithPopup(auth, provider);
+    } catch(e) {
+      if(e.code === 'auth/popup-blocked'){
+        // ポップアップがブロックされている場合 → 案内を表示
+        document.getElementById('safari-popup-guide').style.display='block';
+      } else if(e.code === 'auth/popup-closed-by-user'){
+        // ユーザーが閉じた → 何もしない
       } else {
         alert('ログインに失敗しました: ' + e.message);
       }
-    });
+    }
   };
-
-  // リダイレクト結果の処理（フォールバック用）
-  getRedirectResult(auth).then(result => {
-    // リダイレクトログイン成功時は onAuthStateChanged が自動で処理する
-    if(result && result.user){
-      console.log('リダイレクトログイン成功:', result.user.displayName);
-    }
-  }).catch(e => {
-    if(e && e.code !== 'auth/no-redirect-result' && e.code !== 'auth/null-user'){
-      console.warn('リダイレクトログイン結果エラー:', e.code);
-    }
-  });
 
   window._fbSignOut = async () => {
     if(confirm('ログアウトしますか？')) await signOut(auth);
@@ -101,29 +88,45 @@
 
     onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
       const data = snapshot.val();
-      if(!data) return;
 
-      // デバウンス送信中（自分がまもなく上書きする）はUIだけスキップ
-      // データ自体は受け取らない（古いデータで自分の変更が消えるのを防ぐ）
+      // デバウンス送信中はスキップ（自分の変更が古いデータで上書きされるのを防ぐ）
       if(_saveTimer !== null) return;
+
+      if(!data){
+        // Firebaseにデータなし（初回利用・新規）→ デモデータで初期化して表示
+        if(!window._appInitialized){
+          window._appInitialized = true;
+          STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0};});
+          ensureSchedule(month);
+          seedDemo();
+          initAll();
+        }
+        return;
+      }
 
       try {
         if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
-        // 再描画（month-labelは各端末の表示月を維持）
-        if(typeof rebuildStaffSelect === 'function'){
-          const lt = document.getElementById('logo-text');
-          if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
-          STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0}; });
-          if(!tochoDays[month]) tochoDays[month] = new Set();
-          ensureSchedule(month);
-          rebuildStaffSelect();
-          renderStaffCal(); renderSummary(); renderYkCard(); renderICS();
-          const ct=document.getElementById('cfg-title'); if(ct) ct.value=cfg.title;
-          const ca=document.getElementById('cfg-auto-ake'); if(ca) ca.checked=cfg.autoAke!==false;
-          const cw=document.getElementById('cfg-wish-limit'); if(cw) cw.value=cfg.wishLimit||6;
-          const cd=document.getElementById('cfg-wish-day-limit'); if(cd) cd.value=cfg.wishDayLimit||2;
-          const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
-          if(adminActive){ ensureSchedule(month); renderAdmin(); }
+        // 初回受信時はinitAll()、それ以降は差分再描画
+        if(!window._appInitialized){
+          window._appInitialized = true;
+          initAll();
+        } else {
+          // 他端末からの更新 → 再描画（month-labelは各端末の表示月を維持）
+          if(typeof rebuildStaffSelect === 'function'){
+            const lt = document.getElementById('logo-text');
+            if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
+            STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0}; });
+            if(!tochoDays[month]) tochoDays[month] = new Set();
+            ensureSchedule(month);
+            rebuildStaffSelect();
+            renderStaffCal(); renderSummary(); renderYkCard(); renderICS();
+            const ct=document.getElementById('cfg-title'); if(ct) ct.value=cfg.title;
+            const ca=document.getElementById('cfg-auto-ake'); if(ca) ca.checked=cfg.autoAke!==false;
+            const cw=document.getElementById('cfg-wish-limit'); if(cw) cw.value=cfg.wishLimit||6;
+            const cd=document.getElementById('cfg-wish-day-limit'); if(cd) cd.value=cfg.wishDayLimit||2;
+            const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
+            if(adminActive){ ensureSchedule(month); renderAdmin(); }
+          }
         }
       } catch(e) { console.error('データ反映エラー:', e); }
     });
@@ -142,9 +145,13 @@
   // ── 認証状態の監視 ──
   onAuthStateChanged(auth, (user) => {
     const overlay = document.getElementById('login-overlay');
+    const loginPanel = document.getElementById('login-panel');
+    const loadingPanel = document.getElementById('loading-panel');
     const userInfo = document.getElementById('user-info');
     if(user) {
-      if(overlay) overlay.style.display = 'none';
+      // ログイン済み → ローディング表示に切り替え
+      if(loginPanel) loginPanel.style.display = 'none';
+      if(loadingPanel) loadingPanel.style.display = 'block';
       if(userInfo) {
         userInfo.innerHTML = `
           <img src="${user.photoURL||''}" style="width:28px;height:28px;border-radius:50%;vertical-align:middle;margin-right:6px">
@@ -153,8 +160,12 @@
       }
       window._fbStartSync();
     } else {
+      // 未ログイン → ログインパネルを表示
       if(overlay) overlay.style.display = 'flex';
+      if(loginPanel) loginPanel.style.display = 'block';
+      if(loadingPanel) loadingPanel.style.display = 'none';
       if(userInfo) userInfo.innerHTML = '';
+      window._appInitialized = false;
     }
   });
 </script>
@@ -423,27 +434,39 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
 <body>
 
 <!-- ログインオーバーレイ -->
-<div id="login-overlay" style="position:fixed;inset:0;background:rgba(245,244,240,0.97);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px">
-  <div style="font-size:22px;font-weight:700;letter-spacing:-.3px">勤務表</div>
-  <div style="font-size:13px;color:#6b6860;margin-bottom:8px">職場メンバーのGoogleアカウントでログインしてください</div>
-  <button onclick="_fbSignIn()" style="display:flex;align-items:center;gap:10px;padding:12px 24px;border-radius:8px;border:1px solid #e2e0d8;background:#fff;font-size:14px;font-weight:500;cursor:pointer;font-family:inherit;box-shadow:0 1px 4px rgba(0,0,0,.08)">
-    <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" style="width:20px;height:20px">
-    Googleでログイン
-  </button>
-  <div id="safari-hint" style="display:none;font-size:11px;color:#92400e;background:#fef9c3;border-radius:6px;padding:12px 16px;max-width:300px;text-align:left;line-height:1.8">
-    📌 <strong>iPhone / iPad をご利用の方へ</strong><br>
-    ポップアップでGoogleログイン画面が開きます。<br>
-    ブロックされた場合は：<br>
-    ① Safari設定 →「ポップアップをブロック」をOFF<br>
-    または<br>
-    ② 共有ボタン →「ホーム画面に追加」してから開く
+<div id="login-overlay" style="position:fixed;inset:0;background:rgba(245,244,240,0.97);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px">
+
+  <!-- ログイン前 -->
+  <div id="login-panel">
+    <div style="font-size:22px;font-weight:700;letter-spacing:-.3px;text-align:center;margin-bottom:12px">勤務表</div>
+    <div style="font-size:13px;color:#6b6860;margin-bottom:16px;text-align:center">職場メンバーのGoogleアカウントでログインしてください</div>
+    <button onclick="_fbSignIn()" style="display:flex;align-items:center;gap:10px;padding:12px 24px;border-radius:8px;border:1px solid #e2e0d8;background:#fff;font-size:14px;font-weight:500;cursor:pointer;font-family:inherit;box-shadow:0 1px 4px rgba(0,0,0,.08);margin:0 auto">
+      <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" style="width:20px;height:20px">
+      Googleでログイン
+    </button>
+    <!-- ポップアップブロック時に表示 -->
+    <div id="safari-popup-guide" style="display:none;max-width:320px;margin-top:16px">
+      <div style="background:#fef9c3;border:1px solid #ca8a04;border-radius:8px;padding:14px 16px;font-size:12px;color:#713f12;line-height:1.8">
+        <div style="font-weight:700;margin-bottom:8px">📌 ポップアップをブロックされました</div>
+        <div style="font-weight:600;margin-bottom:4px">iPhoneの場合：</div>
+        <div>① Safariの <strong>「ぁあ」ボタン</strong> をタップ</div>
+        <div>②「Webサイトの設定」→「ポップアップ」を<strong>許可</strong></div>
+        <div>③ ページを再読み込みしてもう一度ログイン</div>
+      </div>
+      <button onclick="document.getElementById('safari-popup-guide').style.display='none';_fbSignIn()" style="margin-top:10px;width:100%;padding:10px;border-radius:8px;border:1px solid #e2e0d8;background:#fff;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit">
+        もう一度試す
+      </button>
+    </div>
   </div>
-  <script>
-    if(/iP(hone|ad|od)/.test(navigator.userAgent)){
-      document.getElementById('safari-hint').style.display='block';
-    }
-  </script>
+
+  <!-- ログイン後・データ読み込み中 -->
+  <div id="loading-panel" style="display:none;text-align:center">
+    <div style="font-size:22px;font-weight:700;letter-spacing:-.3px;margin-bottom:16px">勤務表</div>
+    <div style="width:36px;height:36px;border:3px solid #e2e0d8;border-top-color:#1a1917;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 12px"></div>
+    <div style="font-size:13px;color:#6b6860">データを読み込んでいます…</div>
+  </div>
 </div>
+<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
 
 <header class="hdr">
   <div class="logo" id="logo-text" onclick="editTitle()">放射線科<span id="logo-sub"> 勤務表</span></div>
@@ -1743,6 +1766,10 @@ function seedDemo(){
 
 /* ══ INIT ══ */
 function initAll(){
+  // データ読み込み完了 → オーバーレイを非表示
+  const overlay = document.getElementById('login-overlay');
+  if(overlay) overlay.style.display = 'none';
+
   document.getElementById('month-label').textContent=`${year}年 ${month}月`;
   document.getElementById('logo-text').innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
   STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0};});
@@ -1757,12 +1784,10 @@ function initAll(){
   document.getElementById('cfg-wish-day-limit').value=cfg.wishDayLimit||2;
 }
 
-// Firebase同期が来るまでデモデータで初期表示
-// （ログイン後に_fbStartSync→onValueでFirebaseデータに上書きされる）
-// HTML書き出し版ではkinmuhyo-snapスクリプトがデータを先に設定するためseedDemoをスキップ
-const loaded=loadAll(); // 常にfalseを返す
-if(!loaded && !window._snapLoaded){STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0};});ensureSchedule(month);seedDemo();}
-initAll();
+// 起動時はseedDemoを実行しない
+// ログイン完了→Firebase onValue受信後に初めてinitAll()を呼ぶ
+// それまではローディング表示のまま待機
+window._appInitialized = false;
 
 /* ══ レイアウト切り替え ══
    PC横長  : 2カラムgrid  左[カレンダー→有給→ICS]  右[詳細→登録済み]
