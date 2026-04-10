@@ -65,18 +65,42 @@
     if(confirm('ログアウトしますか？')) await signOut(auth);
   };
 
-  // ── Firebase 保存 ──
+  // ── Firebase 保存／同期（分割パス方式） ──
   //
-  // 【設計方針】
-  //   1. set()呼び出し直後のonValueコールバック（ローカルキャッシュ由来）を1回だけ無視
-  //   2. デバウンス中は常に最新payloadを使う
-  //   3. ユーザーが操作中（selectedDay != null / picker開放中）の間は
-  //      外部からのonValueによるデータ上書きを行わない
+  // 【設計方針】データをパスで分割し「自分が書くパス」と「他者が書くパスを読む」を分離
+  //
+  //   kinmuhyo/shared/meta        … cfg / STAFF / SHIFTS / GROUPS / shukyuKijun / tochoDays / year / month
+  //   kinmuhyo/shared/sched       … schedData（管理者が書く・全員読む）
+  //   kinmuhyo/shared/nenkyu      … nenkyuData（管理者が書く・全員読む）
+  //   kinmuhyo/shared/staff/{name} … 各スタッフの staffData[name]（本人だけが書く）
+  //
+  // この分割により：
+  //   - スタッフAの希望入力がスタッフBやスタッフCの操作で上書きされない
+  //   - onValue で受け取るのは「他者が変更したパスの通知」だけになる
+  //   - 自分が書いたパスへの即時コールバックは _skipOwn で1回スキップ
 
-  let _skipNextOnValue = false;  // 次のonValueを1回スキップするフラグ
+  // 書き込んだパスの即時コールバックをスキップするカウンタ（パスごと）
+  const _skipOwn = { meta: 0, sched: 0, nenkyu: 0, staff: {} };
   let _saveTimer = null;
   let _pendingPayload = null;
 
+  // ── パス別保存ヘルパー ──
+  async function _fbSetPath(path, data, skipKey, skipName) {
+    if(skipName){
+      _skipOwn.staff[skipName] = (_skipOwn.staff[skipName]||0) + 1;
+    } else if(skipKey){
+      _skipOwn[skipKey] = (_skipOwn[skipKey]||0) + 1;
+    }
+    try {
+      await set(ref(db, path), data);
+    } catch(e) {
+      if(skipName) _skipOwn.staff[skipName] = Math.max(0, (_skipOwn.staff[skipName]||1)-1);
+      else if(skipKey) _skipOwn[skipKey] = Math.max(0, (_skipOwn[skipKey]||1)-1);
+      console.error('Firebase保存エラー(' + path + '):', e);
+    }
+  }
+
+  // ── メイン保存関数（デバウンス付き） ──
   window._fbSave = (payload) => {
     const uid = auth.currentUser?.uid;
     if(!uid) return;
@@ -84,47 +108,46 @@
     if(_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(async () => {
       _saveTimer = null;
-      const uid2 = auth.currentUser?.uid;
-      if(!uid2) return;
-      const toSend = _pendingPayload;
+      if(!auth.currentUser) return;
+      const p = _pendingPayload;
       _pendingPayload = null;
-      // set()直前にフラグをセット→直後のonValueをスキップ
-      _skipNextOnValue = true;
-      try {
-        await set(ref(db, 'kinmuhyo/shared'), toSend);
-      } catch(e) {
-        _skipNextOnValue = false;
-        console.error('Firebase保存エラー:', e);
+
+      // ① meta（全体設定）を保存
+      const meta = {
+        cfg: p.cfg, STAFF: p.STAFF, SHIFTS: p.SHIFTS, GROUPS: p.GROUPS,
+        shukyuKijun: p.shukyuKijun, tochoDays: p.tochoDays, year: p.year, month: p.month
+      };
+      await _fbSetPath('kinmuhyo/shared/meta', meta, 'meta');
+
+      // ② schedData を保存（管理者操作用）
+      await _fbSetPath('kinmuhyo/shared/sched', p.schedData || {}, 'sched');
+
+      // ③ nenkyuData を保存
+      await _fbSetPath('kinmuhyo/shared/nenkyu', p.nenkyuData || {}, 'nenkyu');
+
+      // ④ staffData を各スタッフごとに個別パスで保存
+      //    ※ 自分（ログインユーザー）が変更したスタッフ分だけ書く
+      if(p.staffData){
+        const saves = Object.entries(p.staffData).map(([name, data]) =>
+          _fbSetPath('kinmuhyo/shared/staff/' + encodeURIComponent(name), data, null, name)
+        );
+        await Promise.all(saves);
       }
     }, 300);
   };
 
-  // ── Firebase 読み込み（リアルタイム同期） ──
+  // ── リアルタイム同期（パス別リスナー） ──
   let _fbListenerAttached = false;
   window._fbStartSync = () => {
     if(_fbListenerAttached) return;
     _fbListenerAttached = true;
-    onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
 
-      // 自分のset()直後のローカルキャッシュによるコールバックを1回スキップ
-      if(_skipNextOnValue){
-        _skipNextOnValue = false;
-        return;
-      }
-
-      // デバウンス待機中（まもなく自分が書き込む）はスキップ
+    // meta リスナー
+    onValue(ref(db, 'kinmuhyo/shared/meta'), (snapshot) => {
+      if(_skipOwn.meta > 0){ _skipOwn.meta--; return; }
       if(_saveTimer !== null) return;
-
       const data = snapshot.val();
       if(!data) return;
-
-      // ユーザーが希望入力操作中（日付選択中またはpicker開放中）はデータ上書きしない
-      // → 操作完了→saveAll()後のonValueで正しく反映される
-      const pickerOpen = document.getElementById('pk-overlay')?.style.display === 'flex';
-      const staffInteracting = (typeof selectedDay !== 'undefined' && selectedDay !== null);
-      if(pickerOpen || staffInteracting) return;
-
-      // アプリ側のグローバル変数に反映
       try {
         if(data.cfg) cfg = data.cfg;
         if(data.STAFF) STAFF = data.STAFF;
@@ -135,57 +158,102 @@
           tochoDays = {};
           Object.entries(data.tochoDays).forEach(([m,a]) => { tochoDays[m] = new Set(a); });
         }
-        if(data.nenkyuData) nenkyuData = data.nenkyuData;
-        if(data.schedData) schedData = data.schedData;
         if(data.year) year = data.year;
         if(data.month) month = data.month;
-        if(data.staffData){
-          staffData = {};
-          Object.entries(data.staffData).forEach(([n,mv]) => {
-            staffData[n] = {};
-            Object.entries(mv).forEach(([mo,dv]) => {
-              staffData[n][mo] = {};
-              Object.entries(dv).forEach(([d,v]) => {
-                staffData[n][mo][d] = {...v, ng: new Set(v.ng||[])};
-              });
+        _redrawAfterSync();
+      } catch(e){ console.error('meta同期エラー:', e); }
+    });
+
+    // sched リスナー
+    onValue(ref(db, 'kinmuhyo/shared/sched'), (snapshot) => {
+      if(_skipOwn.sched > 0){ _skipOwn.sched--; return; }
+      if(_saveTimer !== null) return;
+      const data = snapshot.val();
+      if(data) schedData = data;
+      _redrawAfterSync();
+    });
+
+    // nenkyu リスナー
+    onValue(ref(db, 'kinmuhyo/shared/nenkyu'), (snapshot) => {
+      if(_skipOwn.nenkyu > 0){ _skipOwn.nenkyu--; return; }
+      if(_saveTimer !== null) return;
+      const data = snapshot.val();
+      if(data) nenkyuData = data;
+      _redrawAfterSync();
+    });
+
+    // staff リスナー（スタッフ全体をまとめて監視）
+    onValue(ref(db, 'kinmuhyo/shared/staff'), (snapshot) => {
+      if(_saveTimer !== null) return;
+      const data = snapshot.val();
+      if(!data) return;
+      try {
+        Object.entries(data).forEach(([encodedName, mv]) => {
+          const name = decodeURIComponent(encodedName);
+          // 自分が書いた直後のコールバックはスキップ
+          if((_skipOwn.staff[name]||0) > 0){ _skipOwn.staff[name]--; return; }
+          // picker操作中・日付選択中のスタッフ本人のデータは上書きしない
+          const pickerOpen = document.getElementById('pk-overlay')?.style.display === 'flex';
+          const isCurrentStaff = (name === (typeof currentStaff !== 'undefined' ? currentStaff : ''));
+          const staffInteracting = isCurrentStaff && (
+            (typeof selectedDay !== 'undefined' && selectedDay !== null) || pickerOpen
+          );
+          if(staffInteracting) return;
+          // staffData に反映（Setを復元）
+          if(!staffData) staffData = {};
+          staffData[name] = {};
+          if(mv){
+            Object.entries(mv).forEach(([mo, dv]) => {
+              staffData[name][mo] = {};
+              if(dv){
+                Object.entries(dv).forEach(([d, v]) => {
+                  staffData[name][mo][d] = {...v, ng: new Set(v.ng||[])};
+                });
+              }
             });
-          });
-        }
-        // Firebase同期後の再描画（currentStaffを維持）
-        if(typeof rebuildStaffSelect === 'function'){
-          document.getElementById('month-label').textContent=year+'年 '+month+'月';
-          const lt=document.getElementById('logo-text');
-          if(lt)lt.innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
-          STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0};});
-          if(!tochoDays[month])tochoDays[month]=new Set();
-          ensureSchedule(month);
-          rebuildStaffSelect();
-          renderStaffCal();renderSummary();renderYkCard();renderICS();
-          const ct=document.getElementById('cfg-title');if(ct)ct.value=cfg.title;
-          const ca=document.getElementById('cfg-auto-ake');if(ca)ca.checked=cfg.autoAke!==false;
-          const cw=document.getElementById('cfg-wish-limit');if(cw)cw.value=cfg.wishLimit||6;
-          const cd=document.getElementById('cfg-wish-day-limit');if(cd)cd.value=cfg.wishDayLimit||2;
-          const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
-          if(adminActive){
-            ensureSchedule(month);
-            renderAdmin();
           }
-        }
-      } catch(e) { console.error('データ反映エラー:', e); }
+        });
+        _redrawAfterSync();
+      } catch(e){ console.error('staff同期エラー:', e); }
     });
   };
 
+  // 同期後の再描画（共通処理）
+  function _redrawAfterSync(){
+    if(typeof rebuildStaffSelect !== 'function') return;
+    try {
+      document.getElementById('month-label').textContent = year+'年 '+month+'月';
+      const lt = document.getElementById('logo-text');
+      if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
+      STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0}; });
+      if(!tochoDays[month]) tochoDays[month] = new Set();
+      ensureSchedule(month);
+      rebuildStaffSelect();
+      renderStaffCal(); renderSummary(); renderYkCard(); renderICS();
+      const ct=document.getElementById('cfg-title'); if(ct) ct.value=cfg.title;
+      const ca=document.getElementById('cfg-auto-ake'); if(ca) ca.checked=cfg.autoAke!==false;
+      const cw=document.getElementById('cfg-wish-limit'); if(cw) cw.value=cfg.wishLimit||6;
+      const cd=document.getElementById('cfg-wish-day-limit'); if(cd) cd.value=cfg.wishDayLimit||2;
+      const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
+      if(adminActive){ ensureSchedule(month); renderAdmin(); }
+    } catch(e){ console.error('再描画エラー:', e); }
+  }
+
   // 即時保存（beforeunload時用・デバウンスなし）
   window._fbSaveImmediate = async (payload) => {
-    const uid = auth.currentUser?.uid;
-    if(!uid) return;
-    _skipNextOnValue = true;
-    try {
-      await set(ref(db, 'kinmuhyo/shared'), payload);
-    } catch(e) {
-      _skipNextOnValue = false;
-      console.error('Firebase即時保存エラー:', e);
-    }
+    if(!auth.currentUser) return;
+    const meta = {
+      cfg: payload.cfg, STAFF: payload.STAFF, SHIFTS: payload.SHIFTS, GROUPS: payload.GROUPS,
+      shukyuKijun: payload.shukyuKijun, tochoDays: payload.tochoDays, year: payload.year, month: payload.month
+    };
+    await Promise.all([
+      _fbSetPath('kinmuhyo/shared/meta', meta, 'meta'),
+      _fbSetPath('kinmuhyo/shared/sched', payload.schedData||{}, 'sched'),
+      _fbSetPath('kinmuhyo/shared/nenkyu', payload.nenkyuData||{}, 'nenkyu'),
+      ...Object.entries(payload.staffData||{}).map(([name, data]) =>
+        _fbSetPath('kinmuhyo/shared/staff/'+encodeURIComponent(name), data, null, name)
+      )
+    ]);
   };
 
   // ── 認証状態の監視 ──
@@ -802,15 +870,25 @@ function serializeTochoDays(){
   const out={};Object.entries(tochoDays).forEach(([m,s])=>{out[m]=[...(s||[])];});return out;
 }
 
+function serializeSchedData(sd){
+  // schedDataをディープコピー（参照渡し防止）
+  const out={};
+  Object.entries(sd).forEach(([m,mv])=>{
+    out[m]={};
+    Object.entries(mv).forEach(([name,arr])=>{ out[m][name]=[...arr]; });
+  });
+  return out;
+}
+
 /* ══ SAVE / LOAD (Firebase) ══ */
 function saveAll(){
-  // Firebaseにリアルタイム保存（window._fbSaveはtype=moduleで定義済み）
   const payload={cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
     tochoDays:serializeTochoDays(),
     staffData:serializeStaffData(staffData),
-    schedData,nenkyuData,year,month};
+    schedData:serializeSchedData(schedData),
+    nenkyuData:JSON.parse(JSON.stringify(nenkyuData)),
+    year,month};
   if(typeof window._fbSave==='function') window._fbSave(payload);
-  // ページ離脱時用に最新ペイロードをキャッシュ
   window._lastPayload = payload;
 }
 function loadAll(){
