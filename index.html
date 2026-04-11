@@ -89,11 +89,8 @@
     onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
       const data = snapshot.val();
 
-      // デバウンス送信中はスキップ（自分の変更が古いデータで上書きされるのを防ぐ）
-      if(_saveTimer !== null) return;
-
       if(!data){
-        // Firebaseにデータなし（初回利用・新規）→ デモデータで初期化して表示
+        // Firebaseにデータなし（完全新規）→ デモデータで初期化
         if(!window._appInitialized){
           window._appInitialized = true;
           STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0};});
@@ -104,29 +101,35 @@
         return;
       }
 
+      // 初回ロード：必ずFirebaseの最新データで初期化（_saveTmerは無視）
+      if(!window._appInitialized){
+        window._appInitialized = true;
+        if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
+        initAll();
+        return;
+      }
+
+      // 2回目以降：デバウンス送信中は自分の _latestPayload が最新なのでスキップ
+      // （送信完了後のonValueで自動的に再受信される）
+      if(_saveTimer !== null) return;
+
+      // 他端末からの更新 → 再描画
       try {
         if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
-        // 初回受信時はinitAll()、それ以降は差分再描画
-        if(!window._appInitialized){
-          window._appInitialized = true;
-          initAll();
-        } else {
-          // 他端末からの更新 → 再描画（month-labelは各端末の表示月を維持）
-          if(typeof rebuildStaffSelect === 'function'){
-            const lt = document.getElementById('logo-text');
-            if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
-            STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0}; });
-            if(!tochoDays[month]) tochoDays[month] = new Set();
-            ensureSchedule(month);
-            rebuildStaffSelect();
-            renderStaffCal(); renderSummary(); renderYkCard(); renderICS();
-            const ct=document.getElementById('cfg-title'); if(ct) ct.value=cfg.title;
-            const ca=document.getElementById('cfg-auto-ake'); if(ca) ca.checked=cfg.autoAke!==false;
-            const cw=document.getElementById('cfg-wish-limit'); if(cw) cw.value=cfg.wishLimit||6;
-            const cd=document.getElementById('cfg-wish-day-limit'); if(cd) cd.value=cfg.wishDayLimit||2;
-            const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
-            if(adminActive){ ensureSchedule(month); renderAdmin(); }
-          }
+        if(typeof rebuildStaffSelect === 'function'){
+          const lt = document.getElementById('logo-text');
+          if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
+          STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0}; });
+          if(!tochoDays[month]) tochoDays[month] = new Set();
+          ensureSchedule(month);
+          rebuildStaffSelect();
+          renderStaffCal(); renderSummary(); renderYkCard(); renderICS();
+          const ct=document.getElementById('cfg-title'); if(ct) ct.value=cfg.title;
+          const ca=document.getElementById('cfg-auto-ake'); if(ca) ca.checked=cfg.autoAke!==false;
+          const cw=document.getElementById('cfg-wish-limit'); if(cw) cw.value=cfg.wishLimit||6;
+          const cd=document.getElementById('cfg-wish-day-limit'); if(cd) cd.value=cfg.wishDayLimit||2;
+          const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
+          if(adminActive){ ensureSchedule(month); renderAdmin(); }
         }
       } catch(e) { console.error('データ反映エラー:', e); }
     });
