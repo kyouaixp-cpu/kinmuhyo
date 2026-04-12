@@ -88,12 +88,11 @@
       const data = snapshot.val();
 
       if(!data){
-        // Firebaseにデータなし（完全新規）→ デモデータで初期化
+        // Firebaseにデータなし（完全新規）→ 空の状態で起動
         if(!window._appInitialized){
           window._appInitialized = true;
           STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0};});
           ensureSchedule(month);
-          seedDemo();
           initAll();
         }
         return;
@@ -877,7 +876,7 @@ function saveAll(){
   window._lastPayload = payload;
 }
 function loadAll(){
-  // Firebase onValue で自動同期されるため、初期ロードはfalseを返してseedDemoを走らせる
+  // Firebase onValue で自動同期されるため、初期ロードはfalseを返す
   // データがFirebaseにあれば_fbStartSync内で上書きされる
   return false;
 }
@@ -1905,31 +1904,6 @@ function updateNenkyu(){
   saveAll();renderNenkyuPanel();alert('繰越を更新しました。本年度付与日数を入力してください。');
 }
 
-/* ══ SEED ══ */
-function seedDemo(){
-  function sw(n,m,d){ensureDay(n,m,d);staffData[n][m][d].wish=true;ensureSchedule(m);schedData[m][n][d-1]='shukyu';}
-  function sl(n,m,d,ng,c){ensureDay(n,m,d);staffData[n][m][d].limit=true;staffData[n][m][d].ng=new Set(ng);staffData[n][m][d].comment=c;}
-  function sk(n,m,d,k){ensureDay(n,m,d);staffData[n][m][d].kibou=k;}
-  sw('横田 崇',5,9);sw('横田 崇',5,16);
-  sw('工藤 哲史',5,5);
-  sl('工藤 哲史',5,8,['tocho','taiki','hayade'],'通院のため午前勤務のみ可');
-  sl('工藤 哲史',5,15,['tocho','taiki'],'保育園行事のため早退予定');
-  sw('髙松 勇佑',5,8);sw('髙松 勇佑',5,22);
-  sl('岩城 くるみ',5,9,['tocho','hayade'],'');
-  sk('平 修一',5,12,'hayade');sk('長瀨 一希',5,19,'taiki');
-  const set=(n,d,k)=>{if(schedData[5]&&schedData[5][n]&&d<=schedData[5][n].length)schedData[5][n][d-1]=k;};
-  set('畠山 智史',7,'tocho');set('畠山 智史',8,'ake');
-  set('横田 崇',1,'tocho');set('横田 崇',2,'ake');
-  set('髙松 勇佑',13,'tocho');set('髙松 勇佑',14,'ake');
-  set('工藤 哲史',8,'nikkn');
-  set('長瀨 一希',20,'tocho');set('長瀨 一希',21,'ake');
-  set('陳祐 綾花',26,'tocho');set('陳祐 綾花',27,'ake');
-  set('岩城 くるみ',2,'ampms');set('平 修一',9,'hayade');
-  set('畠山 智史',9,'taiki');set('横田 崇',3,'taiki');
-  tochoDays[5]=new Set([1,8,15,22,29]);
-  STAFF.forEach((n,i)=>{nenkyuData[n]={grant:20-i,carry:Math.max(0,8-i*2)};});
-}
-
 /* ══ INIT ══ */
 function initAll(){
   // データ読み込み完了 → オーバーレイを非表示
@@ -1952,7 +1926,6 @@ function initAll(){
   document.getElementById('cfg-wish-day-limit').value=cfg.wishDayLimit||2;
 }
 
-// 起動時はseedDemoを実行しない
 // ログイン完了→Firebase onValue受信後に初めてinitAll()を呼ぶ
 // それまではローディング表示のまま待機
 window._appInitialized = false;
