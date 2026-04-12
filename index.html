@@ -489,7 +489,7 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
   </div>
   <div class="tabs">
     <button class="tab on" onclick="showScreen('staff')">希望入力</button>
-    <button class="tab" onclick="showScreen('admin')">管理者</button>
+    <button class="tab" onclick="showScreen('admin')">勤務表</button>
     <button class="tab" onclick="showScreen('settings')">設定</button>
   </div>
   <div id="user-info" style="display:flex;align-items:center;margin-left:8px"></div>
@@ -999,12 +999,12 @@ function updateLinkBtn(){
   btn.style.display='';
   const linked=staffLinks[uid]; // 自分のUIDが紐付いているスタッフ名
   if(linked===currentStaff){
-    // 現在選択中のスタッフが自分と紐付いている → 「登録済み・解除」表示
-    btn.textContent='✓ 登録済み　解除';
+    // 現在選択中のスタッフが自分と紐付いている → 「リンク済み・解除」表示
+    btn.textContent='✓ リンク済み　解除';
     btn.style.background='#dcfce7'; btn.style.color='#166534'; btn.style.borderColor='#86efac';
   } else {
     // 未紐付け or 別スタッフに紐付き中
-    btn.textContent='🔗 自分として登録';
+    btn.textContent='🔗 IDとリンク';
     btn.style.background=''; btn.style.color=''; btn.style.borderColor='';
   }
 }
