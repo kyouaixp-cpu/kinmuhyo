@@ -87,21 +87,12 @@
     _fbUnsubscribe = onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
       const data = snapshot.val();
 
-      if(!data){
-        // Firebaseにデータなし（完全新規）→ 空の状態で起動
-        if(!window._appInitialized){
-          window._appInitialized = true;
-          STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0};});
-          ensureSchedule(month);
-          initAll();
-        }
-        return;
-      }
-
-      // 初回ロード：必ずFirebaseの最新データで初期化（_saveTmerは無視）
+      // 初回ロード：Firebaseの最新データで初期化（データなし=空の状態で起動）
       if(!window._appInitialized){
         window._appInitialized = true;
-        if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
+        STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0};});
+        if(data && typeof window.restoreFromData === 'function') window.restoreFromData(data);
+        ensureSchedule(month);
         initAll();
         return;
       }
