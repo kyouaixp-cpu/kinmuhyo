@@ -403,6 +403,10 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
 .nk-inp{width:54px;padding:6px;border:1px solid var(--border2);border-radius:4px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);outline:none;text-align:center;min-height:36px}
 .nk-status{font-size:11px;font-weight:500}
 .msk-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
+.msk-year-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px}
+.msk-ytab{padding:7px 14px;border-radius:99px;font-size:12px;font-weight:500;cursor:pointer;border:1.5px solid var(--border2);background:var(--surface);color:var(--text2);font-family:inherit;transition:all .12s;min-height:36px}
+.msk-ytab:hover{background:var(--surface2)}
+.msk-ytab.on{background:var(--text);color:#fff;border-color:transparent}
 .msk-item{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 4px;background:var(--surface2);border-radius:var(--rs)}
 .msk-label{font-size:10px;color:var(--text2);font-weight:500}
 .msk-inp{width:56px;padding:6px;border:1px solid var(--border2);border-radius:4px;font-size:14px;font-family:'DM Mono',monospace;background:var(--surface);color:var(--text);outline:none;text-align:center;min-height:40px}
@@ -652,9 +656,6 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
         <div class="note-box">グループ名が管理者画面の集計欄名になります。</div>
       </div>
       <div class="set-panel" id="sp-shukyu">
-        <div class="sec-label">月別 週休規定日数</div>
-        <div style="font-size:12px;color:var(--text2);margin-bottom:8px">各月の週休規定日数（差分を管理者画面の週休計欄に表示）</div>
-        <div class="msk-grid" id="msk-grid"></div>
       </div>
       <div class="set-panel" id="sp-tocho">
         <div class="sec-label">当直・救急日（<span id="tc-month-label"></span>）</div>
@@ -731,7 +732,8 @@ let GROUPS=[
   {name:'日勤',special:null},{name:'当直',special:null},
   {name:'週休',special:'shukyu'},{name:'有給',special:'nenkyu'},
 ];
-let shukyuKijun={1:8,2:8,3:8,4:8,5:8,6:8,7:8,8:8,9:8,10:8,11:8,12:8};
+let shukyuKijun={};  // { year: { month: days } } 年→月の2次元構造
+// 初期値（現在の年をデフォルトで生成するのはinitAll時）
 let tochoDays={};
 // staffData[name][month][day] = {wish, limit, ng:Set, comment, kibou:shiftKey}
 let staffData={};
@@ -810,7 +812,20 @@ function restoreFromData(data){
   if(data.GROUPS) GROUPS=data.GROUPS;
   if(data.shukyuKijun){
     shukyuKijun={};
-    Object.entries(data.shukyuKijun).forEach(([m,v])=>{shukyuKijun[+m]=v;});
+    // 旧形式（{1:8, 2:8, ...}）の自動マイグレーション
+    const firstKey=Object.keys(data.shukyuKijun)[0];
+    if(firstKey && typeof data.shukyuKijun[firstKey]==='number'){
+      // 旧形式 → 現在の年に割り当て
+      const curY=new Date().getFullYear();
+      shukyuKijun[curY]={};
+      Object.entries(data.shukyuKijun).forEach(([m,v])=>{shukyuKijun[curY][+m]=v;});
+    } else {
+      // 新形式
+      Object.entries(data.shukyuKijun).forEach(([y,mv])=>{
+        shukyuKijun[+y]={};
+        if(mv) Object.entries(mv).forEach(([m,v])=>{shukyuKijun[+y][+m]=v;});
+      });
+    }
   }
   if(data.tochoDays){
     tochoDays={};
@@ -964,7 +979,9 @@ function showScreen(s){
   if(s==='staff'){renderStaffCal();renderSummary();renderYkCard();renderICS();}
 }
 function changeMonth(dir){
+  const prevYear=year;
   month+=dir;if(month>12){month=1;year++;}if(month<1){month=12;year--;}
+  if(year!==prevYear) _mskYear=year; // 年が変わったらパネルの選択年も追従
   document.getElementById('month-label').textContent=`${year}年 ${month}月`;
   selectedDay=null;kibouSelected=null;hideDetail();ensureSchedule(month);saveAll();
   const active=document.querySelector('.scr.on').id;
@@ -1386,7 +1403,7 @@ function renderAdmin(){
       const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
       if(sh0){td.style.background=sh0.bg;td.style.color=sh0.fg;}
       if(g.special==='shukyu'){
-        const kijun=shukyuKijun[month]||8;const diff=v-kijun;
+        const kijun=(shukyuKijun[year]&&shukyuKijun[year][month])||8;const diff=v-kijun;
         const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
         td.textContent=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
         td.className='td-sum '+(diff>0?'c-over':diff===0?'c-ok':'c-neu');
@@ -1583,7 +1600,7 @@ function exportExcel(){
       const gbg=sh0?sh0.bg:'#f0efe9';const gfg=sh0?sh0.fg:'#57534e';
       const gcell=row.getCell(sci);
       if(g.special==='shukyu'){
-        const kijun=shukyuKijun[month]||8;const diff=v-kijun;
+        const kijun=(shukyuKijun[year]&&shukyuKijun[year][month])||8;const diff=v-kijun;
         const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
         gcell.value=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
       } else {gcell.value=Number.isInteger(v)?v:v.toFixed(1);}
@@ -1776,13 +1793,73 @@ function addGroup(){GROUPS.push({name:'新グループ',special:null});saveAll()
 function removeGroup(i){if(!confirm('削除しますか？'))return;GROUPS.splice(i,1);saveAll();renderShiftList();}
 
 /* ── Monthly Shukyu Kijun ── */
+let _mskYear = null; // 週休規定パネルで選択中の年
+function getShukyuKijunYear(y){
+  // 指定年のデータがなければ前年またはデフォルト(8)で初期化
+  if(!shukyuKijun[y]){
+    const prevY=y-1;
+    shukyuKijun[y]={};
+    for(let m=1;m<=12;m++){
+      shukyuKijun[y][m]=(shukyuKijun[prevY]&&shukyuKijun[prevY][m]!=null)
+        ? shukyuKijun[prevY][m] : 8;
+    }
+  }
+  return shukyuKijun[y];
+}
 function renderShukyuKijun(){
-  const grid=document.getElementById('msk-grid');grid.innerHTML='';
+  if(!_mskYear) _mskYear=year; // 初回は現在表示中の年
+  // 存在する年キー＋現在年・前後1年を選択肢に
+  const existYears=Object.keys(shukyuKijun).map(Number);
+  const baseYears=[year-1,year,year+1];
+  const allYears=[...new Set([...existYears,...baseYears])].sort((a,b)=>a-b);
+  // パネル全体を再構築
+  const panel=document.getElementById('sp-shukyu');
+  panel.innerHTML=`<div class="sec-label">年別・月別 週休規定日数</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px">各月の週休規定日数（差分を勤務表画面の週休計欄に表示）</div>
+    <div class="msk-year-tabs" id="msk-year-tabs"></div>
+    <div class="msk-grid" id="msk-grid"></div>
+    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" onclick="addMskYear()" style="font-size:12px;border-style:dashed">＋ 年を追加</button>
+      <button class="btn danger" id="msk-del-yr-btn" onclick="deleteMskYear()" style="font-size:12px">この年を削除</button>
+    </div>`;
+  // 年タブ
+  const tabs=document.getElementById('msk-year-tabs');
+  allYears.forEach(y=>{
+    const btn=document.createElement('button');
+    btn.className='msk-ytab'+(y===_mskYear?' on':'');
+    btn.textContent=y+'年';
+    btn.onclick=()=>{_mskYear=y;renderShukyuKijun();};
+    tabs.appendChild(btn);
+  });
+  // 月グリッド
+  const kijun=getShukyuKijunYear(_mskYear);
+  const grid=document.getElementById('msk-grid');
   for(let m=1;m<=12;m++){
     const item=document.createElement('div');item.className='msk-item';
-    item.innerHTML=`<div class="msk-label">${MN[m-1]}</div><input type="number" class="msk-inp" min="0" max="31" value="${shukyuKijun[m]||8}" onchange="shukyuKijun[${m}]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div>`;
+    item.innerHTML=`<div class="msk-label">${MN[m-1]}</div><input type="number" class="msk-inp" min="0" max="31" value="${kijun[m]!=null?kijun[m]:8}" onchange="getShukyuKijunYear(${_mskYear})[${m}]=parseFloat(this.value)||0;saveAll()"><div style="font-size:9px;color:var(--text3)">日</div>`;
     grid.appendChild(item);
   }
+  // 年が1つしかない場合は削除ボタンを無効化
+  const delBtn=document.getElementById('msk-del-yr-btn');
+  if(delBtn) delBtn.disabled=allYears.length<=1;
+}
+function addMskYear(){
+  const input=prompt('追加する年を入力してください（例：2027）','');
+  if(!input) return;
+  const y=parseInt(input);
+  if(isNaN(y)||y<2000||y>2100){alert('正しい年を入力してください');return;}
+  _mskYear=y;
+  getShukyuKijunYear(y); // 初期化
+  saveAll();renderShukyuKijun();
+}
+function deleteMskYear(){
+  const allYears=Object.keys(shukyuKijun).map(Number);
+  if(allYears.length<=1){alert('最低1年分のデータが必要です');return;}
+  if(!confirm(`${_mskYear}年の週休規定日数データを削除しますか？`))return;
+  delete shukyuKijun[_mskYear];
+  const remaining=Object.keys(shukyuKijun).map(Number).sort((a,b)=>a-b);
+  _mskYear=remaining[remaining.length-1];
+  saveAll();renderShukyuKijun();
 }
 
 /* ── Tocho Cal ── */
@@ -1863,6 +1940,7 @@ function initAll(){
   document.getElementById('logo-text').innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
   STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0};});
   if(!tochoDays[month])tochoDays[month]=new Set();
+  getShukyuKijunYear(year); // 現在年のデータがなければ初期化
   ensureSchedule(month);
   if(icsSelShifts.size===0)['tocho','ake','taiki','hayade'].forEach(k=>icsSelShifts.add(k));
   if(icsSelMonths.size===0)icsSelMonths.add(month);
