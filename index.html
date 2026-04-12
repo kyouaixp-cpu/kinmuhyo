@@ -81,12 +81,10 @@
   };
 
   // ── リアルタイム同期 ──
-  let _fbListenerAttached = false;
+  let _fbUnsubscribe = null; // onValue の解除関数
   window._fbStartSync = () => {
-    if(_fbListenerAttached) return;
-    _fbListenerAttached = true;
-
-    onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
+    if(_fbUnsubscribe) return; // すでにリスナー登録済み
+    _fbUnsubscribe = onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
       const data = snapshot.val();
 
       if(!data){
@@ -174,6 +172,8 @@
       if(userInfo) userInfo.innerHTML = '';
       window._currentUID   = null;
       window._currentEmail = '';
+      // Firebaseリスナーを解除してフラグをリセット（再ログイン時に再登録できるよう）
+      if(_fbUnsubscribe){ _fbUnsubscribe(); _fbUnsubscribe=null; }
       window._appInitialized = false;
     }
   });
