@@ -799,7 +799,12 @@ function restoreFromData(data){
   if(data.cfg) cfg=data.cfg;
   if(data.STAFF) STAFF=data.STAFF;
   if(data.SHIFTS) SHIFTS=data.SHIFTS;
-  if(data.GROUPS) GROUPS=data.GROUPS;
+  if(data.GROUPS){
+    GROUPS=data.GROUPS;
+    // 集計欄の表示順を固定：週休→当直→日勤→有給
+    const _ORDER=['週休','当直','日勤','有給'];
+    GROUPS.sort((a,b)=>{const ai=_ORDER.indexOf(a.name);const bi=_ORDER.indexOf(b.name);if(ai===-1&&bi===-1)return 0;if(ai===-1)return 1;if(bi===-1)return -1;return ai-bi;});
+  }
   if(data.shukyuKijun){
     shukyuKijun={};
     // 旧形式（{1:8, 2:8, ...}）の自動マイグレーション
