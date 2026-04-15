@@ -1627,7 +1627,7 @@ function exportExcel(){
     // ── 空白行（スタッフ名セルの下）──
     const blankRowNum=rowNum+1;
     const blankRow=ws.getRow(blankRowNum);
-    blankRow.height=6;
+    blankRow.height=16;
     // 罫線のみ・背景なしで全セルを設定
     const blankStyle={
       fill:{type:'pattern',pattern:'none'},
