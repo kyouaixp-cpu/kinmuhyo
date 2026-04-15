@@ -1357,8 +1357,10 @@ function renderAdmin(){
     tr.appendChild(th);
   }
   GROUPS.forEach(g=>{
+    if(g.special==='nenkyu')return; // 有給計・有給残を非表示
     const th=document.createElement('th');th.className='th-sum';th.textContent=g.name+'計';tr.appendChild(th);
-    if(g.special==='nenkyu'){const th2=document.createElement('th');th2.className='th-sum';th2.textContent='有給残';tr.appendChild(th2);}
+    // 当直計の直後に待機計を挿入
+    if(g.name==='当直'){const th2=document.createElement('th');th2.className='th-sum';th2.textContent='待機計';tr.appendChild(th2);}
   });
   thead.appendChild(tr);
 
@@ -1388,6 +1390,7 @@ function renderAdmin(){
       if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined)grpSums[sh.group]+=sh.count||0;
     }
     GROUPS.forEach(g=>{
+      if(g.special==='nenkyu')return; // 有給計・有給残を非表示
       const v=grpSums[g.name]||0;
       const td=document.createElement('td');td.className='td-sum';
       const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
@@ -1399,10 +1402,14 @@ function renderAdmin(){
         td.className='td-sum '+(diff>0?'c-over':diff===0?'c-ok':'c-neu');
       } else {td.textContent=Number.isInteger(v)?v:v.toFixed(1);}
       row.appendChild(td);
-      if(g.special==='nenkyu'){
-        const nk=calcNenkyu(name);const td2=document.createElement('td');
-        td2.textContent=nk.remain<0?`${nk.remain}日`:`残${nk.remain}日`;
-        td2.className='td-sum '+(nk.remain<0?'c-over':nk.remain<=5?'c-warn':'c-ok');row.appendChild(td2);
+      // 当直計の直後に待機計を挿入
+      if(g.name==='当直'){
+        const taikiCnt=schedData[month][name]?schedData[month][name].filter(k=>k==='taiki').length:0;
+        const taikiSh=SHIFTS.find(s=>s.k==='taiki');
+        const tdT=document.createElement('td');tdT.className='td-sum';
+        if(taikiSh){tdT.style.background=taikiSh.bg;tdT.style.color=taikiSh.fg;}
+        tdT.textContent=taikiCnt;
+        row.appendChild(tdT);
       }
     });
     tbody.appendChild(row);
@@ -1420,7 +1427,7 @@ function renderAdmin(){
     else{td.style.background='#f0efe9';td.style.color='#a09e97';}
     ftr.appendChild(td);
   }
-  GROUPS.forEach(g=>{ftr.appendChild(document.createElement('td'));if(g.special==='nenkyu')ftr.appendChild(document.createElement('td'));});
+  GROUPS.forEach(g=>{if(g.special==='nenkyu')return;ftr.appendChild(document.createElement('td'));if(g.name==='当直')ftr.appendChild(document.createElement('td'));});
   tfoot.appendChild(ftr);
   // 待機者行
   const ftr2=document.createElement('tr');ftr2.className='taiki-row';
@@ -1431,7 +1438,7 @@ function renderAdmin(){
     else{td.textContent='—';td.style.color='#a09e97';}
     ftr2.appendChild(td);
   }
-  GROUPS.forEach(g=>{ftr2.appendChild(document.createElement('td'));if(g.special==='nenkyu')ftr2.appendChild(document.createElement('td'));});
+  GROUPS.forEach(g=>{if(g.special==='nenkyu')return;ftr2.appendChild(document.createElement('td'));if(g.name==='当直')ftr2.appendChild(document.createElement('td'));});
   tfoot.appendChild(ftr2);
 
   // alerts
@@ -1514,13 +1521,20 @@ function exportExcel(){
   });
   ws.pageSetup.margins={left:0.5,right:0.5,top:0.75,bottom:0.75,header:0.3,footer:0.3};
 
-  const totalCols=1+days+GROUPS.reduce((a,g)=>a+1+(g.special==='nenkyu'?1:0),0);
+  const totalCols=1+days+GROUPS.reduce((a,g)=>{
+    if(g.special==='nenkyu')return a; // 有給計・有給残を除外
+    return a+1+(g.name==='当直'?1:0); // 当直計の後に待機計
+  },0);
 
   // 列幅設定
   ws.getColumn(1).width=10;
   for(let d=1;d<=days;d++)ws.getColumn(1+d).width=5.5;
   let ci=2+days;
-  GROUPS.forEach(g=>{ws.getColumn(ci++).width=8;if(g.special==='nenkyu')ws.getColumn(ci++).width=7;});
+  GROUPS.forEach(g=>{
+    if(g.special==='nenkyu')return;
+    ws.getColumn(ci++).width=8;
+    if(g.name==='当直')ws.getColumn(ci++).width=8;
+  });
 
   // ── 行1: タイトル（背景なし・文字黒）──
   const titleRow=ws.getRow(1);
@@ -1530,7 +1544,7 @@ function exportExcel(){
   const titleStyle={
     fill:{type:'pattern',pattern:'none'},
     font:{color:{argb:'FF1a1917'},bold:true,name:'Noto Sans JP',size:11},
-    alignment:{horizontal:'center',vertical:'middle'},
+    alignment:{horizontal:'left',vertical:'middle'},
     border:{top:{style:'thin',color:{argb:'FFE2E0D8'}},bottom:{style:'thin',color:{argb:'FFE2E0D8'}},left:{style:'thin',color:{argb:'FFE2E0D8'}},right:{style:'thin',color:{argb:'FFE2E0D8'}}}
   };
   titleCell.style=titleStyle;
@@ -1552,11 +1566,12 @@ function exportExcel(){
   }
   let hci=2+days;
   GROUPS.forEach(g=>{
+    if(g.special==='nenkyu')return; // 有給計・有給残を非表示
     hdrRow.getCell(hci).value=g.name+'計';
     hdrRow.getCell(hci).style=makeStyle('#e0e7ff','#3730a3',true,'center');
     hci++;
-    if(g.special==='nenkyu'){
-      hdrRow.getCell(hci).value='有給残';
+    if(g.name==='当直'){
+      hdrRow.getCell(hci).value='待機計';
       hdrRow.getCell(hci).style=makeStyle('#e0e7ff','#3730a3',true,'center');
       hci++;
     }
@@ -1564,7 +1579,8 @@ function exportExcel(){
 
   // ── スタッフ行 ──
   STAFF.forEach((name,si)=>{
-    const row=ws.getRow(3+si);
+    const rowNum=3+si*2; // スタッフ行（空白行を挟むため*2）
+    const row=ws.getRow(rowNum);
     row.height=16;
     const grpSums={};GROUPS.forEach(g=>{grpSums[g.name]=0;});
 
@@ -1582,9 +1598,10 @@ function exportExcel(){
       if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined)grpSums[sh.group]+=sh.count||0;
     }
 
-    // 集計列
+    // 集計列（有給計・有給残は出力しない、待機計を当直計の後に追加）
     let sci=2+days;
     GROUPS.forEach(g=>{
+      if(g.special==='nenkyu')return;
       const v=grpSums[g.name]||0;
       const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
       const gbg=sh0?sh0.bg:'#f0efe9';const gfg=sh0?sh0.fg:'#57534e';
@@ -1596,20 +1613,37 @@ function exportExcel(){
       } else {gcell.value=Number.isInteger(v)?v:v.toFixed(1);}
       gcell.style=makeStyle(gbg,gfg,true,'center');
       sci++;
-      if(g.special==='nenkyu'){
-        const nk=calcNenkyu(name);
-        const nkCell=row.getCell(sci);
-        nkCell.value=nk.remain<0?`${nk.remain}日`:`残${nk.remain}日`;
-        const nbg=nk.remain<0?'#FCEBEB':nk.remain<=5?'#FAEEDA':'#EAF3DE';
-        const nfg=nk.remain<0?'#A32D2D':nk.remain<=5?'#854F0B':'#27500A';
-        nkCell.style=makeStyle(nbg,nfg,true,'center');
+      // 当直計の後に待機計
+      if(g.name==='当直'){
+        const taikiCnt=schedData[month][name]?schedData[month][name].filter(k=>k==='taiki').length:0;
+        const taikiSh=SHIFTS.find(s=>s.k==='taiki');
+        const tkCell=row.getCell(sci);
+        tkCell.value=taikiCnt;
+        tkCell.style=makeStyle(taikiSh?taikiSh.bg:'#dcfce7',taikiSh?taikiSh.fg:'#166534',true,'center');
         sci++;
       }
     });
+
+    // ── 空白行（スタッフ名セルの下）──
+    const blankRowNum=rowNum+1;
+    const blankRow=ws.getRow(blankRowNum);
+    blankRow.height=6;
+    // 罫線のみ・背景なしで全セルを設定
+    const blankStyle={
+      fill:{type:'pattern',pattern:'none'},
+      font:{name:'Noto Sans JP',size:9},
+      alignment:{horizontal:'center',vertical:'middle'},
+      border:{top:{style:'thin',color:{argb:'FFE2E0D8'}},bottom:{style:'thin',color:{argb:'FFE2E0D8'}},left:{style:'thin',color:{argb:'FFE2E0D8'}},right:{style:'thin',color:{argb:'FFE2E0D8'}}}
+    };
+    for(let c=1;c<=totalCols;c++){blankRow.getCell(c).style=blankStyle;}
+    // スタッフ名セル（列1）：スタッフ行と空白行を縦結合
+    ws.mergeCells(rowNum,1,blankRowNum,1);
+    ws.getCell(rowNum,1).style=makeStyle('#f0efe9','#57534e',true,'left');
   });
 
   // ── 当直数行 ──
-  const tochoRow=ws.getRow(3+STAFF.length);
+  const tochoRowNum=3+STAFF.length*2;
+  const tochoRow=ws.getRow(tochoRowNum);
   tochoRow.height=16;
   tochoRow.getCell(1).value='当直数';
   tochoRow.getCell(1).style=makeStyle('#f0efe9','#57534e',true,'left');
@@ -1627,17 +1661,17 @@ function exportExcel(){
   }
 
   // ── 待機者行 ──
-  const taikiRow=ws.getRow(4+STAFF.length);
+  const taikiRow=ws.getRow(tochoRowNum+1);
   taikiRow.height=16;
   taikiRow.getCell(1).value='待機者';
-  taikiRow.getCell(1).style=makeStyle('#f0fdf4','#166534',true,'left');
+  taikiRow.getCell(1).style=makeStyle('#f0fdf4','#166634',true,'left');
   for(let d=1;d<=days;d++){
     const cell=taikiRow.getCell(1+d);
     if(!isTochoDay(month,d)){
       const ts=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki');
       cell.value=ts.map(n=>n.split(' ')[0]).join(' ');
     } else {cell.value='';}
-    cell.style=makeStyle('#f0fdf4','#166534',false,'center');
+    cell.style=makeStyle('#f0fdf4','#166634',false,'center');
   }
 
   // ── ダウンロード ──
