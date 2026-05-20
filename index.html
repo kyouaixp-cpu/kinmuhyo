@@ -54,26 +54,29 @@
   // ══════════════════════════════════════════
   // Firebase 保存／同期
   //
-  // 方針：onValueは常に受け取る。スキップしない。
-  //   - set()後に自分のonValueが来ても、すでにアプリ内データは最新なので
-  //     restoreFromData()で上書きしても問題ない（同じデータで上書き）
-  //   - 再描画も毎回行う（Googleスプレッドシートと同じ動作）
-  //   - デバウンスで連続操作をまとめて送信
+  // 方針：自分のset()が完了してonValueで反映されるまでの間、
+  //       onValueのrestoreFromDataをスキップして上書きを防ぐ
   // ══════════════════════════════════════════
 
   let _saveTimer = null;
   let _latestPayload = null;
+  window._isSaving = false;
+  window._lastSavedJson = null; // 自分が最後に送信したJSONの文字列
 
   window._fbSave = (payload) => {
     if(!auth.currentUser) return;
     _latestPayload = payload;
+    window._isSaving = true;
+    window._lastSavedJson = JSON.stringify(payload); // 送信内容を記録
     if(_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(async () => {
       _saveTimer = null;
-      if(!auth.currentUser) return;
+      if(!auth.currentUser){ window._isSaving = false; return; }
       try {
         await set(ref(db, 'kinmuhyo/shared'), _latestPayload);
+        setTimeout(()=>{ window._isSaving = false; }, 5000);
       } catch(e) {
+        window._isSaving = false;
         console.error('Firebase保存エラー:', e);
         alert('保存に失敗しました。通信状況を確認してください。');
       }
@@ -97,13 +100,25 @@
         return;
       }
 
-      // 2回目以降：デバウンス送信中は自分の _latestPayload が最新なのでスキップ
-      // （送信完了後のonValueで自動的に再受信される）
-      if(_saveTimer !== null) return;
+      // 自分が送信したデータの折り返しかどうかをJSONで比較して判定
+      const incomingJson = JSON.stringify(data);
+      const isSelfWrite = window._isSaving && window._lastSavedJson && incomingJson === window._lastSavedJson;
+      if(isSelfWrite){
+        window._isSaving = false;
+        // 勤務種別パネルが開いていればDOMのみ再描画（データ上書きなし）
+        const settingsOpen2 = document.getElementById('scr-settings')?.classList.contains('on');
+        if(settingsOpen2 && typeof _currentSetPanel!=='undefined' && _currentSetPanel==='shifts' && typeof renderShiftList==='function') renderShiftList();
+        return;
+      }
+      // デバウンス中（まだFirebaseに送信前）の折り返しもスキップ
+      if(window._isSaving){ return; }
 
       // 他端末からの更新 → 再描画
       try {
-        if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
+        // 勤務種別パネルが開いているときはSHIFTS/GROUPSを上書きしない
+        const shiftsOpen = document.getElementById('scr-settings')?.classList.contains('on')
+          && typeof _currentSetPanel!=='undefined' && _currentSetPanel==='shifts';
+        if(typeof window.restoreFromData === 'function') window.restoreFromData(data, shiftsOpen);
         if(typeof rebuildStaffSelect === 'function'){
           const lt = document.getElementById('logo-text');
           if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
@@ -119,6 +134,9 @@
           const cd=document.getElementById('cfg-wish-day-limit'); if(cd) cd.value=cfg.wishDayLimit||2;
           const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
           if(adminActive){ ensureSchedule(month); renderAdmin(); }
+          // 設定タブ「勤務種別」が開いていれば再描画（GROUPSオブジェクト参照を最新化）
+          const settingsOpen = document.getElementById('scr-settings')?.classList.contains('on');
+          if(settingsOpen && typeof _currentSetPanel!=='undefined' && _currentSetPanel==='shifts' && typeof renderShiftList==='function') renderShiftList();
         }
       } catch(e) { console.error('データ反映エラー:', e); }
     });
@@ -719,8 +737,8 @@ let SHIFTS=[
   {k:'empty', l:'―',         bg:'#f0efe9',fg:'#a09e97',count:0,  group:'なし',visible:true},
 ];
 let GROUPS=[
-  {name:'週休',special:'shukyu'},{name:'当直',special:null},
-  {name:'日勤',special:null},{name:'有給',special:'nenkyu'},
+  {gk:'shukyu_grp',name:'週休',special:'shukyu'},{gk:'tocho_grp',name:'当直',special:null},
+  {gk:'nikkin_grp',name:'日勤',special:null},{gk:'nenkyu_grp',name:'有給',special:'nenkyu'},
 ];
 let shukyuKijun={};  // { year: { month: days } } 年→月の2次元構造
 // 初期値（現在の年をデフォルトで生成するのはinitAll時）
@@ -795,15 +813,19 @@ function serializeSchedData(sd){
 
 // Firebaseやスナップショットから受け取ったデータを復元する共通関数
 // ※ year・month は各端末のUI状態のため同期しない
-function restoreFromData(data){
+function restoreFromData(data, skipShifts){
   if(data.cfg) cfg=data.cfg;
   if(data.STAFF) STAFF=data.STAFF;
-  if(data.SHIFTS) SHIFTS=data.SHIFTS;
-  if(data.GROUPS){
-    GROUPS=data.GROUPS;
-    // 集計欄の表示順を固定：週休→当直→日勤→有給
-    const _ORDER=['週休','当直','日勤','有給'];
-    GROUPS.sort((a,b)=>{const ai=_ORDER.indexOf(a.name);const bi=_ORDER.indexOf(b.name);if(ai===-1&&bi===-1)return 0;if(ai===-1)return 1;if(bi===-1)return -1;return ai-bi;});
+  if(!skipShifts){
+    if(data.SHIFTS) SHIFTS=data.SHIFTS;
+    if(data.GROUPS){
+      GROUPS=data.GROUPS;
+      // gkがない旧データには自動付与
+      GROUPS.forEach((g,i)=>{if(!g.gk)g.gk='grp_legacy_'+i+'_'+g.name;});
+      // 集計欄の表示順を固定：週休→当直→日勤→有給
+      const _ORDER=['週休','当直','日勤','有給'];
+      GROUPS.sort((a,b)=>{const ai=_ORDER.indexOf(a.name);const bi=_ORDER.indexOf(b.name);if(ai===-1&&bi===-1)return 0;if(ai===-1)return 1;if(bi===-1)return -1;return ai-bi;});
+    }
   }
   if(data.shukyuKijun){
     shukyuKijun={};
@@ -855,6 +877,7 @@ window.restoreFromData = restoreFromData;
 
 /* ══ SAVE / LOAD (Firebase) ══ */
 function saveAll(){
+  window._isSaving = true; // onValueによる上書きを防ぐ（_fbSave内でも再セット）
   // year・monthは各端末のUI状態のためpayloadに含めない
   const payload={
     cfg: JSON.parse(JSON.stringify(cfg)),
@@ -1719,7 +1742,9 @@ function assignShift(name,d,k){
 }
 
 /* ══ SETTINGS ══ */
+let _currentSetPanel = 'basic';
 function showSetPanel(p){
+  _currentSetPanel = p;
   document.querySelectorAll('.set-panel').forEach(el=>el.classList.remove('on'));
   document.querySelectorAll('.set-nav-btn').forEach(el=>el.classList.remove('on'));
   document.getElementById('sp-'+p).classList.add('on');
@@ -1801,25 +1826,83 @@ function removeStaff(i){
 /* ── Shift Customizer ── */
 function renderShiftList(){
   const list=document.getElementById('shift-list');list.innerHTML='';
-  SHIFTS.forEach((s,i)=>{
+  SHIFTS.forEach((s)=>{
+    const sk=s.k;
     const row=document.createElement('div');row.className='shift-row';
     const grpOpts=GROUPS.map(g=>`<option${s.group===g.name?' selected':''}>${g.name}</option>`).join('')+`<option${s.group==='なし'?' selected':''}>なし</option>`;
     const cntOpts=['0','0.5','1'].map(v=>`<option${String(s.count)===v?' selected':''}>${v}</option>`).join('');
-    row.innerHTML=`<div class="sh-handle">⠿</div><div class="sh-chip" style="background:${s.bg};color:${s.fg}" contenteditable="true" onblur="SHIFTS[${i}].l=this.textContent.trim();saveAll()">${s.l}</div><select class="sh-select" onchange="SHIFTS[${i}].count=parseFloat(this.value);saveAll()">${cntOpts}</select><select class="sh-select" onchange="SHIFTS[${i}].group=this.value;saveAll()">${grpOpts}</select><input type="color" value="${s.bg}" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px" onchange="SHIFTS[${i}].bg=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="SHIFTS[${i}].visible=this.value==='表示';saveAll()"><option${s.visible?' selected':''}>表示</option><option${!s.visible?' selected':''}>非表示</option></select><div class="sh-del" onclick="removeShift(${i})">×</div>`;
+    row.innerHTML=`<div class="sh-handle">⠿</div><div class="sh-chip" style="background:${s.bg};color:${s.fg}" contenteditable="true">${s.l}</div><select class="sh-select sh-cnt">${cntOpts}</select><select class="sh-select sh-grp">${grpOpts}</select><input type="color" value="${s.bg}" class="sh-color" style="width:36px;height:32px;border:none;cursor:pointer;border-radius:4px"><select class="sh-select sh-vis"><option${s.visible?' selected':''}>表示</option><option${!s.visible?' selected':''}>非表示</option></select><div class="sh-del">×</div>`;
+    const chip=row.querySelector('.sh-chip');
+    // inputイベントでリアルタイムにSHIFTS更新、blurで保存
+    chip.addEventListener('input',()=>{
+      const cur=SHIFTS.find(x=>x.k===sk);if(cur)cur.l=chip.textContent.trim();
+    });
+    chip.addEventListener('blur',()=>{
+      const cur=SHIFTS.find(x=>x.k===sk);if(cur)cur.l=chip.textContent.trim();
+      saveAll();
+    });
+    row.querySelector('.sh-cnt').addEventListener('change',e=>{
+      const cur=SHIFTS.find(x=>x.k===sk);if(cur){cur.count=parseFloat(e.target.value);saveAll();}
+    });
+    row.querySelector('.sh-grp').addEventListener('change',e=>{
+      const cur=SHIFTS.find(x=>x.k===sk);if(cur){cur.group=e.target.value;saveAll();}
+    });
+    const colorIn=row.querySelector('.sh-color');
+    colorIn.addEventListener('change',e=>{
+      const cur=SHIFTS.find(x=>x.k===sk);if(cur){cur.bg=e.target.value;chip.style.background=e.target.value;saveAll();}
+    });
+    row.querySelector('.sh-vis').addEventListener('change',e=>{
+      const cur=SHIFTS.find(x=>x.k===sk);if(cur){cur.visible=e.target.value==='表示';saveAll();}
+    });
+    row.querySelector('.sh-del').addEventListener('click',()=>{
+      if(!confirm('削除しますか？'))return;
+      const idx=SHIFTS.findIndex(x=>x.k===sk);if(idx!==-1)SHIFTS.splice(idx,1);
+      saveAll();renderShiftList();
+    });
     list.appendChild(row);
   });
+
   const grpList=document.getElementById('grp-list');grpList.innerHTML='';
-  GROUPS.forEach((g,i)=>{
+  GROUPS.forEach((g)=>{
+    const gk=g.gk;
     const row=document.createElement('div');row.className='grp-row';
-    const spOpts=['なし','shukyu','nenkyu'].map(v=>`<option value="${v}"${g.special===v?' selected':''}>${v==='なし'?'特殊なし':v==='shukyu'?'週休（差分表示）':'有給（残日数）'}</option>`).join('');
-    row.innerHTML=`<input class="grp-inp" value="${g.name}" onchange="GROUPS[${i}].name=this.value;renderShiftList();saveAll()"><select class="sh-select" onchange="GROUPS[${i}].special=this.value==='なし'?null:this.value;saveAll()">${spOpts}</select><div class="sh-del" onclick="removeGroup(${i})">×</div>`;
+    const spOpts=[
+      {v:'なし',  label:'特殊なし',        match:g.special===null},
+      {v:'shukyu',label:'週休（差分表示）', match:g.special==='shukyu'},
+      {v:'nenkyu',label:'有給（残日数）',   match:g.special==='nenkyu'},
+    ].map(o=>`<option value="${o.v}"${o.match?' selected':''}>${o.label}</option>`).join('');
+    row.innerHTML=`<input class="grp-inp" value="${g.name}"><select class="sh-select grp-rule">${spOpts}</select><div class="sh-del grp-del">×</div>`;
+    const inp=row.querySelector('.grp-inp');
+    inp.addEventListener('input',()=>{
+      const cur=GROUPS.find(x=>x.gk===gk);
+      if(!cur)return;
+      const oldName=cur.name;
+      cur.name=inp.value;
+      document.querySelectorAll('#shift-list .sh-grp').forEach(sel=>{
+        Array.from(sel.options).forEach(opt=>{if(opt.text===oldName){opt.text=cur.name;opt.value=cur.name;}});
+        if(sel.value===oldName)sel.value=cur.name;
+      });
+      SHIFTS.forEach(s=>{if(s.group===oldName)s.group=cur.name;});
+    });
+    inp.addEventListener('blur',()=>saveAll());
+    row.querySelector('.grp-rule').addEventListener('change',e=>{
+      const cur=GROUPS.find(x=>x.gk===gk);
+      if(cur){cur.special=e.target.value==='なし'?null:e.target.value;saveAll();}
+    });
+    row.querySelector('.grp-del').addEventListener('click',()=>{
+      if(!confirm('削除しますか？'))return;
+      const idx=GROUPS.findIndex(x=>x.gk===gk);
+      if(idx!==-1)GROUPS.splice(idx,1);
+      saveAll();renderShiftList();
+    });
     grpList.appendChild(row);
   });
 }
 function addShift(){SHIFTS.splice(SHIFTS.length-1,0,{k:'sh_'+Date.now(),l:'新規',bg:'#f1f0ea',fg:'#57534e',count:1,group:'なし',visible:true});saveAll();renderShiftList();}
 function removeShift(i){if(!confirm('削除しますか？'))return;SHIFTS.splice(i,1);saveAll();renderShiftList();}
-function addGroup(){GROUPS.push({name:'新グループ',special:null});saveAll();renderShiftList();}
+function addGroup(){GROUPS.push({gk:'grp_'+Date.now(),name:'新グループ',special:null});saveAll();renderShiftList();}
 function removeGroup(i){if(!confirm('削除しますか？'))return;GROUPS.splice(i,1);saveAll();renderShiftList();}
+// updateGroupName は不要になったため削除
 
 /* ── Monthly Shukyu Kijun ── */
 let _mskYear = null; // 週休規定パネルで選択中の年
