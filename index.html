@@ -61,22 +61,23 @@
   let _saveTimer = null;
   let _latestPayload = null;
   window._isSaving = false;
-  window._lastSavedJson = null; // 自分が最後に送信したJSONの文字列
+  window._lastSavedJson = null;
 
   window._fbSave = (payload) => {
     if(!auth.currentUser) return;
     _latestPayload = payload;
+    window._lastSavedJson = JSON.stringify(payload);
     window._isSaving = true;
-    window._lastSavedJson = JSON.stringify(payload); // 送信内容を記録
     if(_saveTimer) clearTimeout(_saveTimer);
     _saveTimer = setTimeout(async () => {
       _saveTimer = null;
       if(!auth.currentUser){ window._isSaving = false; return; }
       try {
         await set(ref(db, 'kinmuhyo/shared'), _latestPayload);
-        setTimeout(()=>{ window._isSaving = false; }, 5000);
+        setTimeout(()=>{ window._isSaving = false; window._lastSavedJson = null; }, 8000);
       } catch(e) {
         window._isSaving = false;
+        window._lastSavedJson = null;
         console.error('Firebase保存エラー:', e);
         alert('保存に失敗しました。通信状況を確認してください。');
       }
@@ -100,25 +101,18 @@
         return;
       }
 
-      // 自分が送信したデータの折り返しかどうかをJSONで比較して判定
+      // 自分が送信したデータの折り返しはスキップ
       const incomingJson = JSON.stringify(data);
-      const isSelfWrite = window._isSaving && window._lastSavedJson && incomingJson === window._lastSavedJson;
-      if(isSelfWrite){
+      if(window._isSaving && window._lastSavedJson && incomingJson === window._lastSavedJson){
         window._isSaving = false;
-        // 勤務種別パネルが開いていればDOMのみ再描画（データ上書きなし）
-        const settingsOpen2 = document.getElementById('scr-settings')?.classList.contains('on');
-        if(settingsOpen2 && typeof _currentSetPanel!=='undefined' && _currentSetPanel==='shifts' && typeof renderShiftList==='function') renderShiftList();
+        window._lastSavedJson = null;
         return;
       }
-      // デバウンス中（まだFirebaseに送信前）の折り返しもスキップ
-      if(window._isSaving){ return; }
+      if(window._isSaving) return; // デバウンス中の古い折り返しもスキップ
 
       // 他端末からの更新 → 再描画
       try {
-        // 勤務種別パネルが開いているときはSHIFTS/GROUPSを上書きしない
-        const shiftsOpen = document.getElementById('scr-settings')?.classList.contains('on')
-          && typeof _currentSetPanel!=='undefined' && _currentSetPanel==='shifts';
-        if(typeof window.restoreFromData === 'function') window.restoreFromData(data, shiftsOpen);
+        if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
         if(typeof rebuildStaffSelect === 'function'){
           const lt = document.getElementById('logo-text');
           if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
@@ -813,19 +807,17 @@ function serializeSchedData(sd){
 
 // Firebaseやスナップショットから受け取ったデータを復元する共通関数
 // ※ year・month は各端末のUI状態のため同期しない
-function restoreFromData(data, skipShifts){
+function restoreFromData(data){
   if(data.cfg) cfg=data.cfg;
   if(data.STAFF) STAFF=data.STAFF;
-  if(!skipShifts){
-    if(data.SHIFTS) SHIFTS=data.SHIFTS;
-    if(data.GROUPS){
-      GROUPS=data.GROUPS;
-      // gkがない旧データには自動付与
-      GROUPS.forEach((g,i)=>{if(!g.gk)g.gk='grp_legacy_'+i+'_'+g.name;});
-      // 集計欄の表示順を固定：週休→当直→日勤→有給
-      const _ORDER=['週休','当直','日勤','有給'];
-      GROUPS.sort((a,b)=>{const ai=_ORDER.indexOf(a.name);const bi=_ORDER.indexOf(b.name);if(ai===-1&&bi===-1)return 0;if(ai===-1)return 1;if(bi===-1)return -1;return ai-bi;});
-    }
+  if(data.SHIFTS) SHIFTS=data.SHIFTS;
+  if(data.GROUPS){
+    GROUPS=data.GROUPS;
+    // gkがない旧データには自動付与
+    GROUPS.forEach((g,i)=>{if(!g.gk)g.gk='grp_legacy_'+i+'_'+g.name;});
+    // 集計欄の表示順を固定：週休→当直→日勤→有給
+    const _ORDER=['週休','当直','日勤','有給'];
+    GROUPS.sort((a,b)=>{const ai=_ORDER.indexOf(a.name);const bi=_ORDER.indexOf(b.name);if(ai===-1&&bi===-1)return 0;if(ai===-1)return 1;if(bi===-1)return -1;return ai-bi;});
   }
   if(data.shukyuKijun){
     shukyuKijun={};
@@ -877,7 +869,7 @@ window.restoreFromData = restoreFromData;
 
 /* ══ SAVE / LOAD (Firebase) ══ */
 function saveAll(){
-  window._isSaving = true; // onValueによる上書きを防ぐ（_fbSave内でも再セット）
+  window._isSaving = true;
   // year・monthは各端末のUI状態のためpayloadに含めない
   const payload={
     cfg: JSON.parse(JSON.stringify(cfg)),
@@ -893,6 +885,10 @@ function saveAll(){
   };
   if(typeof window._fbSave==='function') window._fbSave(payload);
   window._lastPayload = payload;
+  // 勤務種別パネルが開いていれば直接再描画（Firebase折り返しを待たない）
+  if(typeof _currentSetPanel!=='undefined' && _currentSetPanel==='shifts'
+     && document.getElementById('scr-settings')?.classList.contains('on')
+     && typeof renderShiftList==='function') renderShiftList();
 }
 function loadAll(){
   // Firebase onValue で自動同期されるため、初期ロードはfalseを返す
