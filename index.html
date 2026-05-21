@@ -655,7 +655,7 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
         <div class="sec-label" style="margin-top:16px">集計グループ管理</div>
         <div id="grp-list"></div>
         <button class="btn" style="width:100%;margin-top:4px;border-style:dashed" onclick="addGroup()">＋ 集計グループを追加</button>
-        <div class="note-box">グループ名が管理者画面の集計欄名になります。</div>
+        <div class="note-box">グループ名が管理者画面の集計欄名になります。チェックボックスで表示/非表示、↑↓で順番を変更できます。</div>
       </div>
       <div class="set-panel" id="sp-shukyu">
       </div>
@@ -723,7 +723,7 @@ let SHIFTS=[
   {k:'hayade',l:'早出',      bg:'#d1fae5',fg:'#065f46',count:1,  group:'日勤',visible:true},
   {k:'tocho', l:'当直',      bg:'#fee2e2',fg:'#991b1b',count:1,  group:'当直',visible:true},
   {k:'ake',   l:'明け',      bg:'#fef3c7',fg:'#92400e',count:0,  group:'なし',visible:true},
-  {k:'taiki', l:'待機',      bg:'#dcfce7',fg:'#166534',count:0,  group:'なし',visible:true},
+  {k:'taiki', l:'待機',      bg:'#dcfce7',fg:'#166534',count:1,  group:'待機',visible:true},
   {k:'shukyu',l:'週休',      bg:'#f1f0ea',fg:'#57534e',count:1,  group:'週休',visible:true},
   {k:'nenkyu',l:'年休',      bg:'#fce7f3',fg:'#9d174d',count:1,  group:'有給',visible:true},
   {k:'ampms', l:'午前(週休)',bg:'#ede9fe',fg:'#4c1d95',count:0.5,group:'週休',visible:true},
@@ -731,8 +731,11 @@ let SHIFTS=[
   {k:'empty', l:'―',         bg:'#f0efe9',fg:'#a09e97',count:0,  group:'なし',visible:true},
 ];
 let GROUPS=[
-  {gk:'shukyu_grp',name:'週休',special:'shukyu'},{gk:'tocho_grp',name:'当直',special:null},
-  {gk:'nikkin_grp',name:'日勤',special:null},{gk:'nenkyu_grp',name:'有給',special:'nenkyu'},
+  {gk:'shukyu_grp',name:'週休',special:'shukyu', visible:true},
+  {gk:'taiki_grp', name:'待機',special:'taiki',  visible:true},
+  {gk:'tocho_grp', name:'当直',special:null,     visible:true},
+  {gk:'nikkin_grp',name:'日勤',special:null,     visible:true},
+  {gk:'nenkyu_grp',name:'有給',special:'nenkyu', visible:true},
 ];
 let shukyuKijun={};  // { year: { month: days } } 年→月の2次元構造
 // 初期値（現在の年をデフォルトで生成するのはinitAll時）
@@ -813,11 +816,30 @@ function restoreFromData(data){
   if(data.SHIFTS) SHIFTS=data.SHIFTS;
   if(data.GROUPS){
     GROUPS=data.GROUPS;
-    // gkがない旧データには自動付与
-    GROUPS.forEach((g,i)=>{if(!g.gk)g.gk='grp_legacy_'+i+'_'+g.name;});
-    // 集計欄の表示順を固定：週休→当直→日勤→有給
-    const _ORDER=['週休','当直','日勤','有給'];
-    GROUPS.sort((a,b)=>{const ai=_ORDER.indexOf(a.name);const bi=_ORDER.indexOf(b.name);if(ai===-1&&bi===-1)return 0;if(ai===-1)return 1;if(bi===-1)return -1;return ai-bi;});
+    // 旧データのマイグレーション
+    GROUPS.forEach((g,i)=>{
+      if(!g.gk) g.gk='grp_legacy_'+i+'_'+g.name;
+      if(g.visible===undefined) g.visible=true;
+    });
+    // 旧データに待機グループがなければ追加（週休の次）
+    if(!GROUPS.find(g=>g.special==='taiki')){
+      const shukyuIdx=GROUPS.findIndex(g=>g.special==='shukyu');
+      GROUPS.splice(shukyuIdx>=0?shukyuIdx+1:1,0,{gk:'taiki_grp',name:'待機',special:'taiki',visible:true});
+    }
+    // _lastSavedJsonもマイグレーション後の形式に同期（自己書き込み判定を正確に）
+    if(window._lastSavedJson){
+      try{
+        const parsed=JSON.parse(window._lastSavedJson);
+        if(parsed.GROUPS){
+          parsed.GROUPS.forEach((g,i)=>{if(!g.gk)g.gk='grp_legacy_'+i+'_'+g.name;if(g.visible===undefined)g.visible=true;});
+          if(!parsed.GROUPS.find(g=>g.special==='taiki')){
+            const si=parsed.GROUPS.findIndex(g=>g.special==='shukyu');
+            parsed.GROUPS.splice(si>=0?si+1:1,0,{gk:'taiki_grp',name:'待機',special:'taiki',visible:true});
+          }
+        }
+        window._lastSavedJson=JSON.stringify(parsed);
+      }catch(e){}
+    }
   }
   if(data.shukyuKijun){
     shukyuKijun={};
@@ -1380,11 +1402,9 @@ function renderAdmin(){
     th.innerHTML=`${d}<br><span style="font-size:9px">${DOW[getDow(year,month,d)]}</span>${isHolDay?'<br><span style="font-size:7px">祝</span>':''}${isTD?'<br><span style="font-size:7px">当</span>':''}`;
     tr.appendChild(th);
   }
-  GROUPS.forEach(g=>{
-    if(g.special==='nenkyu')return; // 有給計・有給残を非表示
-    // 週休計の直後（当直計の前）に待機計を挿入
-    if(g.name==='当直'){const th0=document.createElement('th');th0.className='th-sum';th0.textContent='待機計';tr.appendChild(th0);}
-    const th=document.createElement('th');th.className='th-sum';th.textContent=g.name+'計';tr.appendChild(th);
+  GROUPS.filter(g=>g.visible!==false).forEach(g=>{
+    const label=g.special==='nenkyu'?'有給残':g.name+'計';
+    const th=document.createElement('th');th.className='th-sum';th.textContent=label;tr.appendChild(th);
   });
   thead.appendChild(tr);
 
@@ -1411,29 +1431,30 @@ function renderAdmin(){
       if(dd.limit){const ngN=dd.ng&&dd.ng.size?[...dd.ng].map(k2=>shiftByKey(k2).l).join('・'):'';if(ngN)tip+=ngN+'は不可\n';if(dd.comment)tip+=dd.comment;}
       if(tip)td.title=tip.trim();
       td.onclick=e=>openPicker(name,d,td,e);row.appendChild(td);
-      if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined)grpSums[sh.group]+=sh.count||0;
-    }
-    GROUPS.forEach(g=>{
-      if(g.special==='nenkyu')return; // 有給計・有給残を非表示
-      // 週休計の直後（当直計の前）に待機計を挿入
-      if(g.name==='当直'){
-        const taikiCnt=schedData[month][name]?schedData[month][name].filter(k=>k==='taiki').length:0;
-        const taikiSh=SHIFTS.find(s=>s.k==='taiki');
-        const tdT=document.createElement('td');tdT.className='td-sum';
-        if(taikiSh){tdT.style.background=taikiSh.bg;tdT.style.color=taikiSh.fg;}
-        tdT.textContent=taikiCnt;
-        row.appendChild(tdT);
+      // grpSumsへの集計：taikiは出現回数（1固定）、その他はcount
+      if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined){
+        const grp=GROUPS.find(g=>g.name===sh.group);
+        grpSums[sh.group]+=(grp&&grp.special==='taiki')?1:(sh.count||0);
       }
+    }
+    GROUPS.filter(g=>g.visible!==false).forEach(g=>{
       const v=grpSums[g.name]||0;
       const td=document.createElement('td');td.className='td-sum';
-      const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
-      if(sh0){td.style.background=sh0.bg;td.style.color=sh0.fg;}
-      if(g.special==='shukyu'){
+      if(g.special==='nenkyu'){
+        // 有給残
+        const nk=calcNenkyu(name);
+        td.textContent=nk.remain<0?`${nk.remain}日`:`残${nk.remain}日`;
+        td.className='td-sum '+(nk.remain<0?'c-over':nk.remain<=5?'c-warn':'c-ok');
+      } else if(g.special==='shukyu'){
         const kijun=(shukyuKijun[year]&&shukyuKijun[year][month])||8;const diff=v-kijun;
         const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
         td.textContent=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
         td.className='td-sum '+(diff>0?'c-over':diff===0?'c-ok':'c-neu');
-      } else {td.textContent=Number.isInteger(v)?v:v.toFixed(1);}
+      } else {
+        const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
+        if(sh0){td.style.background=sh0.bg;td.style.color=sh0.fg;}
+        td.textContent=Number.isInteger(v)?v:v.toFixed(1);
+      }
       row.appendChild(td);
     });
     tbody.appendChild(row);
@@ -1451,7 +1472,7 @@ function renderAdmin(){
     else{td.style.background='#f0efe9';td.style.color='#a09e97';}
     ftr.appendChild(td);
   }
-  GROUPS.forEach(g=>{if(g.special==='nenkyu')return;if(g.name==='当直')ftr.appendChild(document.createElement('td'));ftr.appendChild(document.createElement('td'));});
+  GROUPS.filter(g=>g.visible!==false).forEach(()=>ftr.appendChild(document.createElement('td')));
   tfoot.appendChild(ftr);
   // 待機者行
   const ftr2=document.createElement('tr');ftr2.className='taiki-row';
@@ -1462,7 +1483,7 @@ function renderAdmin(){
     else{td.textContent='—';td.style.color='#a09e97';}
     ftr2.appendChild(td);
   }
-  GROUPS.forEach(g=>{if(g.special==='nenkyu')return;if(g.name==='当直')ftr2.appendChild(document.createElement('td'));ftr2.appendChild(document.createElement('td'));});
+  GROUPS.filter(g=>g.visible!==false).forEach(()=>ftr2.appendChild(document.createElement('td')));
   tfoot.appendChild(ftr2);
 
   // alerts
@@ -1545,20 +1566,13 @@ function exportExcel(){
   });
   ws.pageSetup.margins={left:0.5,right:0.5,top:0.75,bottom:0.75,header:0.3,footer:0.3};
 
-  const totalCols=1+days+GROUPS.reduce((a,g)=>{
-    if(g.special==='nenkyu')return a; // 有給計・有給残を除外
-    return a+1+(g.name==='当直'?1:0); // 当直計の後に待機計
-  },0);
+  const totalCols=1+days+GROUPS.filter(g=>g.visible!==false).length;
 
   // 列幅設定
   ws.getColumn(1).width=10;
   for(let d=1;d<=days;d++)ws.getColumn(1+d).width=5.5;
   let ci=2+days;
-  GROUPS.forEach(g=>{
-    if(g.special==='nenkyu')return;
-    ws.getColumn(ci++).width=8;
-    if(g.name==='当直')ws.getColumn(ci++).width=8;
-  });
+  GROUPS.filter(g=>g.visible!==false).forEach(()=>{ ws.getColumn(ci++).width=8; });
 
   // ── 行1: タイトル（背景なし・文字黒）──
   const titleRow=ws.getRow(1);
@@ -1589,14 +1603,9 @@ function exportExcel(){
     cell.style=makeStyle(bg,fg,true,'center');
   }
   let hci=2+days;
-  GROUPS.forEach(g=>{
-    if(g.special==='nenkyu')return;
-    if(g.name==='当直'){
-      hdrRow.getCell(hci).value='待機計';
-      hdrRow.getCell(hci).style=makeStyle('#e0e7ff','#3730a3',true,'center');
-      hci++;
-    }
-    hdrRow.getCell(hci).value=g.name+'計';
+  GROUPS.filter(g=>g.visible!==false).forEach(g=>{
+    const label=g.special==='nenkyu'?'有給残':g.name+'計';
+    hdrRow.getCell(hci).value=label;
     hdrRow.getCell(hci).style=makeStyle('#e0e7ff','#3730a3',true,'center');
     hci++;
   });
@@ -1619,33 +1628,34 @@ function exportExcel(){
       const cell=row.getCell(1+d);
       cell.value=sh.l;
       cell.style=makeStyle(sh.bg,sh.fg,false,'center');
-      if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined)grpSums[sh.group]+=sh.count||0;
+      if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined){
+        const grp=GROUPS.find(g=>g.name===sh.group);
+        grpSums[sh.group]+=(grp&&grp.special==='taiki')?1:(sh.count||0);
+      }
     }
 
-    // 集計列（有給計・有給残は出力しない、待機計を当直計の前に追加）
+    // 集計列（GROUPSの順・visible=trueのみ）
     let sci=2+days;
-    GROUPS.forEach(g=>{
-      if(g.special==='nenkyu')return;
-      // 当直計の前に待機計
-      if(g.name==='当直'){
-        const taikiCnt=schedData[month][name]?schedData[month][name].filter(k=>k==='taiki').length:0;
-        const taikiSh=SHIFTS.find(s=>s.k==='taiki');
-        const tkCell=row.getCell(sci);
-        tkCell.value=taikiCnt;
-        tkCell.style=makeStyle(taikiSh?taikiSh.bg:'#dcfce7',taikiSh?taikiSh.fg:'#166534',true,'center');
-        sci++;
-      }
-      const v=grpSums[g.name]||0;
-      const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
-      const gbg=sh0?sh0.bg:'#f0efe9';const gfg=sh0?sh0.fg:'#57534e';
-      const gcell=row.getCell(sci);
-      if(g.special==='shukyu'){
+    GROUPS.filter(g=>g.visible!==false).forEach(g=>{
+      const gcell=row.getCell(sci++);
+      if(g.special==='nenkyu'){
+        const nk=calcNenkyu(name);
+        gcell.value=nk.remain<0?`${nk.remain}日`:`残${nk.remain}日`;
+        const nbg=nk.remain<0?'#FCEBEB':nk.remain<=5?'#FAEEDA':'#EAF3DE';
+        const nfg=nk.remain<0?'#A32D2D':nk.remain<=5?'#854F0B':'#27500A';
+        gcell.style=makeStyle(nbg,nfg,true,'center');
+      } else if(g.special==='shukyu'){
+        const v=grpSums[g.name]||0;
         const kijun=(shukyuKijun[year]&&shukyuKijun[year][month])||8;const diff=v-kijun;
         const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
         gcell.value=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
-      } else {gcell.value=Number.isInteger(v)?v:v.toFixed(1);}
-      gcell.style=makeStyle(gbg,gfg,true,'center');
-      sci++;
+        gcell.style=makeStyle('#f1f0ea','#57534e',true,'center');
+      } else {
+        const v=grpSums[g.name]||0;
+        const sh0=SHIFTS.find(s=>s.group===g.name&&s.k!=='empty');
+        gcell.value=Number.isInteger(v)?v:v.toFixed(1);
+        gcell.style=makeStyle(sh0?sh0.bg:'#f0efe9',sh0?sh0.fg:'#57534e',true,'center');
+      }
     });
 
     // ── 空白行（スタッフ名セルの下）──
@@ -1683,6 +1693,8 @@ function exportExcel(){
       cell.style=makeStyle('#f0efe9','#a09e97',false,'center');
     }
   }
+  // 集計列の空セル（列数合わせ）
+  {let tci=2+days;GROUPS.filter(g=>g.visible!==false).forEach(()=>{const c=tochoRow.getCell(tci++);c.value='';c.style=makeStyle('#f0efe9','#a09e97',false,'center');});}
 
   // ── 待機者行 ──
   const taikiRow=ws.getRow(tochoRowNum+1);
@@ -1697,6 +1709,8 @@ function exportExcel(){
     } else {cell.value='';}
     cell.style=makeStyle('#f0fdf4','#166634',false,'center');
   }
+  // 集計列の空セル（列数合わせ）
+  {let tkci=2+days;GROUPS.filter(g=>g.visible!==false).forEach(()=>{const c=taikiRow.getCell(tkci++);c.value='';c.style=makeStyle('#f0fdf4','#166634',false,'center');});}
 
   // ── ダウンロード ──
   wb.xlsx.writeBuffer().then(buf=>{
@@ -1866,8 +1880,19 @@ function renderShiftList(){
       {v:'なし',  label:'特殊なし',        match:g.special===null},
       {v:'shukyu',label:'週休（差分表示）', match:g.special==='shukyu'},
       {v:'nenkyu',label:'有給（残日数）',   match:g.special==='nenkyu'},
+      {v:'taiki', label:'待機（回数）',     match:g.special==='taiki'},
     ].map(o=>`<option value="${o.v}"${o.match?' selected':''}>${o.label}</option>`).join('');
-    row.innerHTML=`<input class="grp-inp" value="${g.name}"><select class="sh-select grp-rule">${spOpts}</select><div class="sh-del grp-del">×</div>`;
+    row.innerHTML=`
+      <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
+        <input type="checkbox" class="grp-vis" ${g.visible!==false?'checked':''} style="width:16px;height:16px;cursor:pointer" title="表示/非表示">
+        <input class="grp-inp" value="${g.name}" style="flex:1">
+        <select class="sh-select grp-rule" style="width:130px">${spOpts}</select>
+        <div style="display:flex;flex-direction:column;gap:1px">
+          <button class="grp-up" style="font-size:10px;padding:1px 5px;cursor:pointer;background:#f0efe9;border:1px solid #d1cfc8;border-radius:3px">↑</button>
+          <button class="grp-dn" style="font-size:10px;padding:1px 5px;cursor:pointer;background:#f0efe9;border:1px solid #d1cfc8;border-radius:3px">↓</button>
+        </div>
+        <div class="sh-del grp-del">×</div>
+      </div>`;
     const inp=row.querySelector('.grp-inp');
     inp.addEventListener('input',()=>{
       const cur=GROUPS.find(x=>x.gk===gk);
@@ -1881,9 +1906,21 @@ function renderShiftList(){
       SHIFTS.forEach(s=>{if(s.group===oldName)s.group=cur.name;});
     });
     inp.addEventListener('blur',()=>saveAll());
+    row.querySelector('.grp-vis').addEventListener('change',e=>{
+      const cur=GROUPS.find(x=>x.gk===gk);
+      if(cur){cur.visible=e.target.checked;saveAll();}
+    });
     row.querySelector('.grp-rule').addEventListener('change',e=>{
       const cur=GROUPS.find(x=>x.gk===gk);
       if(cur){cur.special=e.target.value==='なし'?null:e.target.value;saveAll();}
+    });
+    row.querySelector('.grp-up').addEventListener('click',()=>{
+      const idx=GROUPS.findIndex(x=>x.gk===gk);
+      if(idx>0){[GROUPS[idx-1],GROUPS[idx]]=[GROUPS[idx],GROUPS[idx-1]];saveAll();renderShiftList();}
+    });
+    row.querySelector('.grp-dn').addEventListener('click',()=>{
+      const idx=GROUPS.findIndex(x=>x.gk===gk);
+      if(idx<GROUPS.length-1){[GROUPS[idx],GROUPS[idx+1]]=[GROUPS[idx+1],GROUPS[idx]];saveAll();renderShiftList();}
     });
     row.querySelector('.grp-del').addEventListener('click',()=>{
       if(!confirm('削除しますか？'))return;
@@ -1896,7 +1933,7 @@ function renderShiftList(){
 }
 function addShift(){SHIFTS.splice(SHIFTS.length-1,0,{k:'sh_'+Date.now(),l:'新規',bg:'#f1f0ea',fg:'#57534e',count:1,group:'なし',visible:true});saveAll();renderShiftList();}
 function removeShift(i){if(!confirm('削除しますか？'))return;SHIFTS.splice(i,1);saveAll();renderShiftList();}
-function addGroup(){GROUPS.push({gk:'grp_'+Date.now(),name:'新グループ',special:null});saveAll();renderShiftList();}
+function addGroup(){GROUPS.push({gk:'grp_'+Date.now(),name:'新グループ',special:null,visible:true});saveAll();renderShiftList();}
 function removeGroup(i){if(!confirm('削除しますか？'))return;GROUPS.splice(i,1);saveAll();renderShiftList();}
 // updateGroupName は不要になったため削除
 
