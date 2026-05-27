@@ -1366,7 +1366,9 @@ function renderICS(){
 function downloadICS(){
   if(!icsSelMonths.size){alert('取り込む月を選択してください');return;}
   if(!icsSelShifts.size){alert('取り込む勤務種別を選択してください');return;}
-  let ics='BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//'+cfg.title+' 勤務表//\r\nCALSCALE:GREGORIAN\r\n';
+  // PRODIDは英数字のみ（日本語不可・//EN必須）
+  let ics='BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//KinmuhyoApp//Schedule//EN\r\nCALSCALE:GREGORIAN\r\nMETHOD:PUBLISH\r\n';
+  let eventCount=0;
   [...icsSelMonths].sort((a,b)=>a-b).forEach(m=>{
     const sched=schedData[m]?.[currentStaff];if(!sched)return;
     const days=daysInMonth(year,m);
@@ -1376,19 +1378,30 @@ function downloadICS(){
       const dt=`${year}${String(m).padStart(2,'0')}${String(d).padStart(2,'0')}`;
       const dtEnd=new Date(year,m-1,d+1);
       const dtEndStr=`${dtEnd.getFullYear()}${String(dtEnd.getMonth()+1).padStart(2,'0')}${String(dtEnd.getDate()).padStart(2,'0')}`;
-      ics+=`BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:${dt}\r\nDTEND;VALUE=DATE:${dtEndStr}\r\nSUMMARY:${cfg.title}\u3000${sh.l}\r\nUID:${dt}-${k}@kinmuhyo\r\nEND:VEVENT\r\n`;
+      // SUMMARYは半角スペース区切り、特殊文字をエスケープ
+      const summary=`${cfg.title} ${sh.l}`.replace(/[\\;,]/g,'\\$&');
+      // UIDは日付+シフト+インデックスで完全一意に
+      const uid=`${dt}-${k}-${++eventCount}@kinmuhyo`;
+      ics+=`BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:${dt}\r\nDTEND;VALUE=DATE:${dtEndStr}\r\nSUMMARY:${summary}\r\nUID:${uid}\r\nEND:VEVENT\r\n`;
     }
   });
   ics+='END:VCALENDAR';
+
+  if(eventCount===0){alert('選択した条件に該当する勤務がありません');return;}
 
   // iOS Safari判定
   const isIOS=/iP(hone|ad|od)/i.test(navigator.userAgent);
   if(isIOS){
     // iOSはBlob+a.click()が動作しないため、data URIでカレンダーアプリに直接渡す
-    // Base64エンコードしてdata:text/calendarで開く
     const b64=btoa(unescape(encodeURIComponent(ics)));
     const dataUri='data:text/calendar;charset=utf-8;base64,'+b64;
-    window.location.href=dataUri;
+    // aタグをDOMに追加してクリック（window.location.hrefより確実）
+    const a=document.createElement('a');
+    a.href=dataUri;
+    a.download=`kinmuhyo_${currentStaff.split(' ')[0]}.ics`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>document.body.removeChild(a),500);
   } else {
     const blob=new Blob([ics],{type:'text/calendar;charset=utf-8'});
     const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${currentStaff.split(' ')[0]}.ics`;a.click();
