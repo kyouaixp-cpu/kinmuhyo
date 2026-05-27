@@ -562,8 +562,8 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
         <div class="ics-months" id="ics-months"></div>
         <div style="font-size:11px;color:var(--text2);margin-top:6px">取り込む勤務種別</div>
         <div class="ics-shifts" id="ics-shifts"></div>
-        <button class="btn primary" style="margin-top:8px;width:100%" onclick="downloadICS()">↓ .ics をダウンロード</button>
-        <div style="font-size:10px;color:var(--text3);margin-top:4px">iPhone / Google カレンダー 両対応</div>
+        <button class="btn primary" style="margin-top:8px;width:100%" onclick="downloadICS()">↓ .ics をダウンロード / カレンダーに追加</button>
+        <div id="ics-note" style="font-size:10px;color:var(--text3);margin-top:4px">iPhone / Google カレンダー 両対応</div>
       </div>
     </div>
 
@@ -1343,6 +1343,12 @@ function renderYkCard(){
 
 /* ══ ICS ══ */
 function renderICS(){
+  const isIOS=/iP(hone|ad|od)/i.test(navigator.userAgent);
+  // iOSの場合は注意書きを更新
+  const note=document.getElementById('ics-note');
+  if(note) note.textContent=isIOS
+    ?'iPhoneの場合：ボタンをタップ後、カレンダーアプリが開きます。開かない場合は「ファイル」アプリから.icsを開いてください。'
+    :'iPhone / Google カレンダー 両対応';
   const el=document.getElementById('ics-months');el.innerHTML='';
   for(let m=1;m<=12;m++){
     const chip=document.createElement('span');chip.className='ics-chip'+(icsSelMonths.has(m)?' on':'');
@@ -1374,8 +1380,20 @@ function downloadICS(){
     }
   });
   ics+='END:VCALENDAR';
-  const blob=new Blob([ics],{type:'text/calendar;charset=utf-8'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${currentStaff.split(' ')[0]}.ics`;a.click();
+
+  // iOS Safari判定
+  const isIOS=/iP(hone|ad|od)/i.test(navigator.userAgent);
+  if(isIOS){
+    // iOSはBlob+a.click()が動作しないため、data URIでカレンダーアプリに直接渡す
+    // Base64エンコードしてdata:text/calendarで開く
+    const b64=btoa(unescape(encodeURIComponent(ics)));
+    const dataUri='data:text/calendar;charset=utf-8;base64,'+b64;
+    window.location.href=dataUri;
+  } else {
+    const blob=new Blob([ics],{type:'text/calendar;charset=utf-8'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${currentStaff.split(' ')[0]}.ics`;a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }
 }
 
 /* ══ ADMIN ══ */
