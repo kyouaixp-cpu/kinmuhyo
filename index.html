@@ -1379,7 +1379,7 @@ function downloadICS(){
       const dtEnd=new Date(year,m-1,d+1);
       const dtEndStr=`${dtEnd.getFullYear()}${String(dtEnd.getMonth()+1).padStart(2,'0')}${String(dtEnd.getDate()).padStart(2,'0')}`;
       // SUMMARYは半角スペース区切り、特殊文字をエスケープ
-      const summary=`${cfg.title} ${sh.l}`.replace(/[\\;,]/g,'\\$&');
+      const summary=`${sh.l}`.replace(/[\\;,]/g,'\\$&');
       // UIDは日付+シフト+インデックスで完全一意に
       const uid=`${dt}-${k}-${++eventCount}@kinmuhyo`;
       ics+=`BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:${dt}\r\nDTEND;VALUE=DATE:${dtEndStr}\r\nSUMMARY:${summary}\r\nUID:${uid}\r\nEND:VEVENT\r\n`;
