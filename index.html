@@ -747,7 +747,7 @@ let nenkyuData={};
 let staffLinks={};   // { uid: staffName } Google IDとスタッフの紐付け
 let icsSelMonths=new Set();
 let icsSelShifts=new Set();
-let year=2026,month=5;
+let year=new Date().getFullYear(),month=new Date().getMonth()+1;
 let currentStaff='';
 let currentMode='wish';
 let selectedDay=null;
