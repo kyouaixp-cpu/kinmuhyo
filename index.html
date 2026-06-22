@@ -94,7 +94,7 @@
       // 初回ロード：Firebaseの最新データで初期化（データなし=空の状態で起動）
       if(!window._appInitialized){
         window._appInitialized = true;
-        STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0};});
+        STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0,hourLimit:16};});
         if(data && typeof window.restoreFromData === 'function') window.restoreFromData(data);
         ensureSchedule(month);
         initAll();
@@ -116,7 +116,7 @@
         if(typeof rebuildStaffSelect === 'function'){
           const lt = document.getElementById('logo-text');
           if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
-          STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0}; });
+          STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0,hourLimit:16}; });
           if(!tochoDays[month]) tochoDays[month] = new Set();
           ensureSchedule(month);
           rebuildStaffSelect();
@@ -554,6 +554,7 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
             <div class="bl-item"><div class="bl-dot" style="background:var(--surface2);border:1px solid var(--border)"></div>残</div>
           </div>
         </div>
+        <div id="yk-hour" style="margin-top:8px"></div>
       </div>
       <!-- ICSカード -->
       <div class="ics-card" id="card-ics">
@@ -776,9 +777,12 @@ function ensureSchedule(m){
     if(!schedData[m][name]){
       schedData[m][name]=[];
       for(let d=1;d<=days;d++)
-        schedData[m][name].push((isSat(year,m,d)||isSun(year,m,d)||isHol(year,m,d))?'shukyu':'nikkn');
+        schedData[m][name].push({k:(isSat(year,m,d)||isSun(year,m,d)||isHol(year,m,d))?'shukyu':'nikkn',h:0});
+    } else {
+      // 旧形式（文字列）を {k,h} に変換
+      schedData[m][name]=schedData[m][name].map(cell=>typeof cell==='string'?{k:cell,h:0}:(cell&&cell.k?cell:{k:'empty',h:0}));
     }
-    while(schedData[m][name].length<days)schedData[m][name].push('nikkn');
+    while(schedData[m][name].length<days)schedData[m][name].push({k:'nikkn',h:0});
     if(schedData[m][name].length>days)schedData[m][name].length=days;
   });
 }
@@ -803,10 +807,16 @@ function serializeSchedData(sd){
   const out={};
   Object.entries(sd).forEach(([m,mv])=>{
     out[m]={};
-    Object.entries(mv).forEach(([name,arr])=>{ out[m][name]=[...arr]; });
+    Object.entries(mv).forEach(([name,arr])=>{
+      out[m][name]=arr.map(cell=>typeof cell==='string'?{k:cell,h:0}:{k:cell.k||'empty',h:cell.h||0});
+    });
   });
   return out;
 }
+// セルからシフトキーを取得するヘルパー
+const cellKey=cell=>(typeof cell==='string'?cell:(cell&&cell.k)||'empty');
+// セルから時間年休時間を取得するヘルパー
+const cellHour=cell=>(typeof cell==='object'&&cell?cell.h||0:0);
 
 // Firebaseやスナップショットから受け取ったデータを復元する共通関数
 // ※ year・month は各端末のUI状態のため同期しない
@@ -862,13 +872,21 @@ function restoreFromData(data){
     tochoDays={};
     Object.entries(data.tochoDays).forEach(([m,a])=>{tochoDays[+m]=new Set(a);});
   }
-  if(data.nenkyuData) nenkyuData=data.nenkyuData;
+  if(data.nenkyuData){
+    nenkyuData=data.nenkyuData;
+    // hourLimit が未設定の場合デフォルト16をセット
+    Object.keys(nenkyuData).forEach(name=>{
+      if(nenkyuData[name].hourLimit===undefined) nenkyuData[name].hourLimit=16;
+    });
+  }
   if(data.schedData){
     schedData={};
     Object.entries(data.schedData).forEach(([m,mv])=>{
       schedData[+m]={};
       if(mv) Object.entries(mv).forEach(([name,arr])=>{
-        schedData[+m][name]=Array.isArray(arr)?arr:[];
+        schedData[+m][name]=Array.isArray(arr)
+          ? arr.map(cell=>typeof cell==='string'?{k:cell,h:0}:(cell&&cell.k?cell:{k:'empty',h:0}))
+          : [];
       });
     });
   }
@@ -946,7 +964,7 @@ function exportHtml(){
       if(_snap.tochoDays){tochoDays={};Object.entries(_snap.tochoDays).forEach(([m,a])=>{tochoDays[+m]=new Set(a);});}
       if(_snap.nenkyuData)nenkyuData=_snap.nenkyuData;
       if(_snap.staffLinks)staffLinks=_snap.staffLinks;
-      if(_snap.schedData){schedData={};Object.entries(_snap.schedData).forEach(([m,mv])=>{schedData[+m]={};if(mv)Object.entries(mv).forEach(([n,a])=>{schedData[+m][n]=Array.isArray(a)?a:[];});});}
+      if(_snap.schedData){schedData={};Object.entries(_snap.schedData).forEach(([m,mv])=>{schedData[+m]={};if(mv)Object.entries(mv).forEach(([n,a])=>{schedData[+m][n]=Array.isArray(a)?a.map(c=>typeof c==='string'?{k:c,h:0}:(c&&c.k?c:{k:'empty',h:0})):[];});});}
       if(_snap.staffData){staffData={};Object.entries(_snap.staffData).forEach(([n,mv])=>{staffData[n]={};if(mv)Object.entries(mv).forEach(([mo,dv])=>{staffData[n][+mo]={};if(dv)Object.entries(dv).forEach(([d,v])=>{staffData[n][+mo][+d]={...v,ng:new Set(v.ng||[])};});});});}
     }
     if(typeof initAll==='function')initAll();
@@ -1135,14 +1153,15 @@ function tapDay(d){
     dd.wish=!dd.wish;
     // 希望休を管理者画面に即時反映
     ensureSchedule(month);
+    const curH=cellHour(schedData[month][currentStaff][d-1]);
     if(dd.wish){
-      schedData[month][currentStaff][d-1]='shukyu';
+      schedData[month][currentStaff][d-1]={k:'shukyu',h:curH};
       // 警告チェック（平日のみ）
       checkWishWarnings(currentStaff,month);
     } else {
       // 解除時は日勤に戻す（土日祝は週休のまま）
       if(!isSat(year,month,d)&&!isSun(year,month,d)&&!isHol(year,month,d)){
-        schedData[month][currentStaff][d-1]='nikkn';
+        schedData[month][currentStaff][d-1]={k:'nikkn',h:curH};
       }
     }
     if(!dd.wish&&!dd.limit&&!dd.ng.size&&!dd.comment&&!dd.kibou)delete staffData[currentStaff][month][d];
@@ -1246,24 +1265,26 @@ function saveKibou(){
   // 管理者カレンダーに直接反映
   ensureSchedule(month);
   if(kibouSelected){
-    schedData[month][currentStaff][selectedDay-1]=kibouSelected;
+    const curH=cellHour(schedData[month][currentStaff][selectedDay-1]);
+    schedData[month][currentStaff][selectedDay-1]={k:kibouSelected,h:curH};
     // 当直 → 翌日を明けに自動セット（設定がONの場合）
     if(kibouSelected==='tocho'&&cfg.autoAke!==false){
       const totalDays=daysInMonth(year,month);
       if(selectedDay<totalDays){
-        schedData[month][currentStaff][selectedDay]='ake';
+        schedData[month][currentStaff][selectedDay]={k:'ake',h:0};
       } else {
         const nm=month===12?1:month+1;
         ensureSchedule(nm);
-        if(schedData[nm][currentStaff])schedData[nm][currentStaff][0]='ake';
+        if(schedData[nm][currentStaff])schedData[nm][currentStaff][0]={k:'ake',h:0};
       }
     }
   } else {
     // 解除時：希望休なら週休、土日祝なら週休、それ以外は日勤
     const d=selectedDay;
-    if(dd.wish){schedData[month][currentStaff][d-1]='shukyu';}
-    else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){schedData[month][currentStaff][d-1]='shukyu';}
-    else{schedData[month][currentStaff][d-1]='nikkn';}
+    const curH=cellHour(schedData[month][currentStaff][d-1]);
+    if(dd.wish){schedData[month][currentStaff][d-1]={k:'shukyu',h:curH};}
+    else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){schedData[month][currentStaff][d-1]={k:'shukyu',h:curH};}
+    else{schedData[month][currentStaff][d-1]={k:'nikkn',h:curH};}
   }
   if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][month][selectedDay];
   selectedDay=null;kibouSelected=null;hideDetail();saveAll();renderStaffCal();renderSummary();
@@ -1296,10 +1317,11 @@ function deleteEntry(d){
   if(staffData[currentStaff]?.[month])delete staffData[currentStaff][month][d];
   // 希望休・希望勤務が削除されたら管理者画面も戻す
   if(schedData[month]&&schedData[month][currentStaff]){
+    const curH=cellHour(schedData[month][currentStaff][d-1]);
     if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){
-      schedData[month][currentStaff][d-1]='shukyu';
+      schedData[month][currentStaff][d-1]={k:'shukyu',h:curH};
     } else {
-      schedData[month][currentStaff][d-1]='nikkn';
+      schedData[month][currentStaff][d-1]={k:'nikkn',h:curH};
     }
   }
   if(selectedDay===+d){selectedDay=null;kibouSelected=null;hideDetail();}
@@ -1308,18 +1330,29 @@ function deleteEntry(d){
 
 /* ══ NENKYU CARD ══ */
 function calcNenkyu(name){
-  const nd=nenkyuData[name]||{grant:0,carry:0};
+  const nd=nenkyuData[name]||{grant:0,carry:0,hourLimit:16};
   let consumed=0;
+  let hourUsed=0; // 時間年休 使用時間合計
   for(let mo=1;mo<=12;mo++){
     const sched=schedData[mo]?.[name];if(!sched)continue;
-    sched.forEach(k=>{if(k==='nenkyu')consumed+=1;if(k==='ampmn')consumed+=0.5;});
+    sched.forEach(cell=>{
+      const k=cellKey(cell);
+      if(k==='nenkyu')consumed+=1;
+      if(k==='ampmn')consumed+=0.5;
+      hourUsed+=cellHour(cell);
+    });
   }
+  const hourLimit=nd.hourLimit||16;
+  const hourRemain=Math.max(0,hourLimit-hourUsed);
+  // 繰越可能な時間年休日数：8h単位切り捨て（繰越は日単位有給へ）
+  const hourCarryDays=Math.floor(hourRemain/8);
   const total=(nd.grant||0)+(nd.carry||0);
   const carryUsed=Math.min(consumed,nd.carry||0);
   const grantUsed=Math.max(0,consumed-(nd.carry||0));
   return{grant:nd.grant||0,carry:nd.carry||0,total,consumed,carryUsed,grantUsed,
     carryRem:Math.max(0,(nd.carry||0)-carryUsed),grantRem:Math.max(0,(nd.grant||0)-grantUsed),
-    remain:Math.max(0,(nd.carry||0)-carryUsed)+Math.max(0,(nd.grant||0)-grantUsed)};
+    remain:Math.max(0,(nd.carry||0)-carryUsed)+Math.max(0,(nd.grant||0)-grantUsed),
+    hourUsed,hourRemain,hourLimit,hourCarryDays};
 }
 function renderYkCard(){
   const fy=getNenkyuFiscalYear();
@@ -1339,6 +1372,21 @@ function renderYkCard(){
   const pct=nk.total>0?100/nk.total:0;
   document.getElementById('bar-carry').style.width=Math.min(nk.carryUsed*pct,100)+'%';
   document.getElementById('bar-curr').style.width=Math.min(nk.grantUsed*pct,100)+'%';
+  // 時間年休表示
+  const hEl=document.getElementById('yk-hour');
+  if(hEl){
+    const overHour=nk.hourUsed>nk.hourLimit;
+    hEl.innerHTML=`<div style="font-size:10px;font-weight:500;color:var(--text2);margin-bottom:4px;border-top:1px solid var(--border);padding-top:8px">時間年休（上限${nk.hourLimit}h・繰越には非反映）</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:13px;font-weight:700;font-family:'DM Mono',monospace;color:${overHour?'#991b1b':'#7c2d12'}">${nk.hourUsed}h 使用</span>
+        <span style="font-size:12px;color:var(--text2)">残 ${nk.hourRemain}h</span>
+        ${nk.hourCarryDays>0?`<span style="font-size:10px;background:#dbeafe;color:#1e40af;padding:2px 6px;border-radius:4px">繰越予定 +${nk.hourCarryDays}日（日単位有給）</span>`:''}
+        ${overHour?`<span style="font-size:10px;background:#fee2e2;color:#991b1b;padding:2px 6px;border-radius:4px">上限超過</span>`:''}
+      </div>
+      <div style="height:5px;border-radius:3px;background:var(--surface2);overflow:hidden;margin-top:5px">
+        <div style="height:100%;border-radius:3px;background:${overHour?'#dc2626':'#f97316'};width:${Math.min(nk.hourUsed/nk.hourLimit*100,100)}%"></div>
+      </div>`;
+  }
 }
 
 /* ══ ICS ══ */
@@ -1373,7 +1421,7 @@ function downloadICS(){
     const sched=schedData[m]?.[currentStaff];if(!sched)return;
     const days=daysInMonth(year,m);
     for(let d=1;d<=days;d++){
-      const k=sched[d-1];if(!icsSelShifts.has(k))continue;
+      const k=cellKey(sched[d-1]);if(!icsSelShifts.has(k))continue;
       const sh=shiftByKey(k);
       const dt=`${year}${String(m).padStart(2,'0')}${String(d).padStart(2,'0')}`;
       const dtEnd=new Date(year,m-1,d+1);
@@ -1446,7 +1494,8 @@ function renderAdmin(){
     const tdN=document.createElement('td');tdN.className='td-name';tdN.textContent=name.split(' ')[0];row.appendChild(tdN);
     const grpSums={};GROUPS.forEach(g=>{grpSums[g.name]=0;});
     for(let d=1;d<=days;d++){
-      const k=(schedData[month][name]&&schedData[month][name][d-1])||'empty';
+      const cell=(schedData[month][name]&&schedData[month][name][d-1])||{k:'empty',h:0};
+      const k=cellKey(cell);const h=cellHour(cell);
       const sh=shiftByKey(k);
       const dd=staffData[name]?.[month]?.[d]||{};
       const isConflict=dd.ng&&dd.ng.has&&dd.ng.has(k);
@@ -1455,11 +1504,18 @@ function renderAdmin(){
       if(dd.wish)td.classList.add('wish-mark');
       if(dd.kibou)td.classList.add('kibou-mark');
       if(dd.limit&&!dd.wish&&!dd.kibou)td.classList.add('limit-mark');
-      td.style.background=sh.bg;td.style.color=sh.fg;td.textContent=sh.l;
+      td.style.background=sh.bg;td.style.color=sh.fg;
+      // 時間年休バッジ表示
+      if(h>0){
+        td.innerHTML=`<div style="line-height:1.2">${sh.l}<br><span style="font-size:8px;background:#ffedd5;color:#7c2d12;padding:0 3px;border-radius:2px;font-weight:700">${h}h</span></div>`;
+      } else {
+        td.textContent=sh.l;
+      }
       let tip='';
       if(dd.wish)tip+='希望休\n';
       if(dd.kibou)tip+=`希望勤務: ${shiftByKey(dd.kibou).l}\n`;
       if(dd.limit){const ngN=dd.ng&&dd.ng.size?[...dd.ng].map(k2=>shiftByKey(k2).l).join('・'):'';if(ngN)tip+=ngN+'は不可\n';if(dd.comment)tip+=dd.comment;}
+      if(h>0)tip+=`時間年休: ${h}h`;
       if(tip)td.title=tip.trim();
       td.onclick=e=>openPicker(name,d,td,e);row.appendChild(td);
       // grpSumsへの集計：taikiは出現回数（1固定）、その他はcount
@@ -1496,7 +1552,7 @@ function renderAdmin(){
   const ftr=document.createElement('tr');
   const ftd=document.createElement('td');ftd.className='td-name';ftd.textContent='当直数';ftr.appendChild(ftd);
   for(let d=1;d<=days;d++){
-    const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='tocho').length;
+    const cnt=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='tocho').length;
     const isTD=isTochoDay(month,d);const td=document.createElement('td');
     td.style.cssText='font-weight:500;font-size:10px;text-align:center;padding:3px 2px';td.textContent=cnt;
     if(isTD){td.style.background=cnt>=2?'#dcfce7':'#fee2e2';td.style.color=cnt>=2?'#166534':'#991b1b';}
@@ -1510,7 +1566,7 @@ function renderAdmin(){
   const ftd2=document.createElement('td');ftd2.className='td-name';ftd2.style.cssText='font-size:10px;color:#166534;font-weight:500;padding:3px 6px;background:#f0fdf4';ftd2.textContent='待機者';ftr2.appendChild(ftd2);
   for(let d=1;d<=days;d++){
     const isTD=isTochoDay(month,d);const td=document.createElement('td');td.className='taiki-name-cell';
-    if(!isTD){const ts=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki');td.textContent=ts.map(n=>n.split(' ')[0]).join(' ');td.title=ts.join('、');}
+    if(!isTD){const ts=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='taiki');td.textContent=ts.map(n=>n.split(' ')[0]).join(' ');td.title=ts.join('、');}
     else{td.textContent='—';td.style.color='#a09e97';}
     ftr2.appendChild(td);
   }
@@ -1522,10 +1578,10 @@ function renderAdmin(){
   const uniqueC=[...new Set(conflicts)];const tochoAlert=[],taikiAlert=[];
   for(let d=1;d<=days;d++){
     if(isTochoDay(month,d)){
-      const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='tocho').length;
+      const cnt=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='tocho').length;
       if(cnt<2)tochoAlert.push(`${d}日(${cnt}名)`);
     } else if(!isSat(year,month,d)&&!isSun(year,month,d)&&!hols.has(d)){
-      const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki').length;
+      const cnt=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='taiki').length;
       if(cnt<1)taikiAlert.push(d+'日');
     }
   }
@@ -1541,10 +1597,24 @@ function renderAdmin(){
     if(cnt>dayLimit)wishOverDays.push(`${d}日(${cnt}名)`);
   }
   if(wishOverDays.length)msgs.push(`希望休 上限超過(平日${dayLimit}名まで): ${wishOverDays.join('・')}`);
+  // 時間年休超過チェック
+  const hourOverStaff=[];const hourDayOverList=[];
+  STAFF.forEach(name=>{
+    const nk=calcNenkyu(name);
+    if(nk.hourUsed>nk.hourLimit)hourOverStaff.push(`${name.split(' ')[0]}(${nk.hourUsed}h)`);
+    // 1日3h超過チェック
+    for(let d=1;d<=days;d++){
+      const cell=schedData[month][name]?.[d-1];
+      const h=cellHour(cell);
+      if(h>3)hourDayOverList.push(`${name.split(' ')[0]} ${month}/${d}日(${h}h)`);
+    }
+  });
+  if(hourOverStaff.length)msgs.push(`時間年休 上限超過(上限16h): ${hourOverStaff.join('・')}`);
+  if(hourDayOverList.length)msgs.push(`時間年休 1日3h超過: ${hourDayOverList.join('・')}`);
   if(msgs.length){ab.innerHTML=msgs.join('<br>');ab.classList.add('on');}else ab.classList.remove('on');
 
   const bar=document.getElementById('stat-bar');bar.innerHTML='';
-  const totalTocho=STAFF.reduce((a,n)=>a+(schedData[month][n]?schedData[month][n].filter(k=>k==='tocho').length:0),0);
+  const totalTocho=STAFF.reduce((a,n)=>a+(schedData[month][n]?schedData[month][n].filter(c=>cellKey(c)==='tocho').length:0),0);
   const wishCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[month]||{}).filter(v=>v.wish).length,0);
   const kibouCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[month]||{}).filter(v=>v.kibou).length,0);
   [{label:'当直計',val:totalTocho,sub:'今月',col:'#991b1b'},
@@ -1565,10 +1635,11 @@ function resetMonth(){
     schedData[month][name]=[];
     for(let d=1;d<=days;d++){
       const dd=staffData[name]?.[month]?.[d]||{};
-      // 希望休は週休として反映
-      if(dd.wish)schedData[month][name].push('shukyu');
-      else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d))schedData[month][name].push('shukyu');
-      else schedData[month][name].push('nikkn');
+      let k;
+      if(dd.wish)k='shukyu';
+      else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d))k='shukyu';
+      else k='nikkn';
+      schedData[month][name].push({k,h:0});
     }
   });
   saveAll();renderAdmin();
@@ -1654,11 +1725,12 @@ function exportExcel(){
 
     // 勤務セル
     for(let d=1;d<=days;d++){
-      const k=(schedData[month][name]&&schedData[month][name][d-1])||'empty';
+      const cell=(schedData[month][name]&&schedData[month][name][d-1])||{k:'empty',h:0};
+      const k=cellKey(cell);const h=cellHour(cell);
       const sh=shiftByKey(k);
-      const cell=row.getCell(1+d);
-      cell.value=sh.l;
-      cell.style=makeStyle(sh.bg,sh.fg,false,'center');
+      const xcell=row.getCell(1+d);
+      xcell.value=h>0?`${sh.l} ${h}h`:sh.l;
+      xcell.style=makeStyle(sh.bg,sh.fg,false,'center');
       if(sh.group&&sh.group!=='なし'&&grpSums[sh.group]!==undefined){
         const grp=GROUPS.find(g=>g.name===sh.group);
         grpSums[sh.group]+=(grp&&grp.special==='taiki')?1:(sh.count||0);
@@ -1714,7 +1786,7 @@ function exportExcel(){
   tochoRow.getCell(1).style=makeStyle('#f0efe9','#57534e',true,'left');
   for(let d=1;d<=days;d++){
     const isTD=isTochoDay(month,d);
-    const cnt=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='tocho').length;
+    const cnt=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='tocho').length;
     const cell=tochoRow.getCell(1+d);
     if(isTD){
       cell.value=cnt;
@@ -1735,7 +1807,7 @@ function exportExcel(){
   for(let d=1;d<=days;d++){
     const cell=taikiRow.getCell(1+d);
     if(!isTochoDay(month,d)){
-      const ts=STAFF.filter(n=>schedData[month][n]&&schedData[month][n][d-1]==='taiki');
+      const ts=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='taiki');
       cell.value=ts.map(n=>n.split(' ')[0]).join(' ');
     } else {cell.value='';}
     cell.style=makeStyle('#f0fdf4','#166634',false,'center');
@@ -1768,17 +1840,45 @@ function openPicker(name,d,td,e){
     btn.onclick=()=>{assignShift(name,d,s.k);closePicker();renderAdmin();};
     shiftsEl.appendChild(btn);
   });
+  // 時間年休セクション
+  const curCell=schedData[month]?.[name]?.[d-1]||{k:'empty',h:0};
+  const curH=cellHour(curCell);
+  const nk=calcNenkyu(name);
+  const hourOver=nk.hourUsed>nk.hourLimit;
+  const hourDiv=document.createElement('div');
+  hourDiv.style.cssText='margin-top:8px;padding-top:8px;border-top:1px solid var(--border)';
+  hourDiv.innerHTML=`<div style="font-size:11px;font-weight:500;color:var(--text2);margin-bottom:5px">時間年休（この日）</div>
+    <div style="display:flex;gap:4px;margin-bottom:5px" id="pk-hour-btns"></div>
+    <div style="font-size:10px;color:${hourOver?'#991b1b':'#7c2d12'};padding:3px 6px;background:${hourOver?'#fee2e2':'#ffedd5'};border-radius:4px">
+      今年度使用: ${nk.hourUsed}h　残: ${nk.hourRemain}h / ${nk.hourLimit}h
+    </div>`;
+  shiftsEl.parentNode.insertBefore(hourDiv,shiftsEl.nextSibling);
+  const hBtns=document.getElementById('pk-hour-btns');
+  [0,1,2,3].forEach(hv=>{
+    const b=document.createElement('button');
+    b.style.cssText=`flex:1;padding:6px 2px;border-radius:4px;border:1px solid var(--border2);font-size:11px;font-weight:500;cursor:pointer;font-family:inherit;min-height:32px;background:${curH===hv?'#ffedd5':'var(--surface)'};color:${curH===hv?'#7c2d12':'var(--text2)'}`;
+    b.textContent=hv===0?'なし':`${hv}h`;
+    b.onclick=()=>{assignHour(name,d,hv);closePicker();renderAdmin();};
+    hBtns.appendChild(b);
+  });
   document.getElementById('pk-overlay').classList.add('on');
 }
 function closePicker(){document.getElementById('pk-overlay').classList.remove('on');}
 function assignShift(name,d,k){
   if(!schedData[month])schedData[month]={};ensureSchedule(month);
-  schedData[month][name][d-1]=k;
+  const curH=cellHour(schedData[month][name][d-1]);
+  schedData[month][name][d-1]={k,h:curH};
   if(k==='tocho'&&cfg.autoAke){
     const days=daysInMonth(year,month);
-    if(d<days){schedData[month][name][d]='ake';}
-    else{const nm=month===12?1:month+1;ensureSchedule(nm);if(schedData[nm][name])schedData[nm][name][0]='ake';}
+    if(d<days){schedData[month][name][d]={k:'ake',h:0};}
+    else{const nm=month===12?1:month+1;ensureSchedule(nm);if(schedData[nm][name])schedData[nm][name][0]={k:'ake',h:0};}
   }
+  saveAll();
+}
+function assignHour(name,d,h){
+  if(!schedData[month])schedData[month]={};ensureSchedule(month);
+  const curK=cellKey(schedData[month][name][d-1]);
+  schedData[month][name][d-1]={k:curK,h};
   saveAll();
 }
 
@@ -1849,7 +1949,7 @@ function addStaff(){
   const inp=document.getElementById('add-staff-inp');const name=inp.value.trim();if(!name)return;
   if(STAFF.includes(name)){alert('同じ名前のスタッフがすでにいます');return;}
   STAFF.push(name);if(!staffData[name])staffData[name]={};if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0};
-  Object.keys(schedData).forEach(m=>{if(!schedData[m][name]){const days=daysInMonth(year,+m);schedData[m][name]=[];for(let d=1;d<=days;d++)schedData[m][name].push((isSat(year,+m,d)||isSun(year,+m,d))?'shukyu':'nikkn');}});
+  Object.keys(schedData).forEach(m=>{if(!schedData[m][name]){const days=daysInMonth(year,+m);schedData[m][name]=[];for(let d=1;d<=days;d++)schedData[m][name].push({k:(isSat(year,+m,d)||isSun(year,+m,d))?'shukyu':'nikkn',h:0});}});
   inp.value='';saveAll();rebuildStaffSelect();renderStaffMgr();
 }
 function removeStaff(i){
@@ -2062,22 +2162,44 @@ function renderTochoCal(){
 function renderNenkyuPanel(){
   const fy=getNenkyuFiscalYear();document.getElementById('nk-year-label').textContent=fy;
   const list=document.getElementById('nk-list');list.innerHTML='';
-  // ヘッダー行（1行のみ）
+  // ヘッダー行
   const hdr=document.createElement('div');hdr.className='nk-row';
-  hdr.style.cssText='font-size:10px;font-weight:500;color:var(--text3);background:none;padding:2px 10px;min-height:auto';
-  hdr.innerHTML='<div>氏名</div><div>本年度付与</div><div>前年度繰越</div><div>消化合計／残</div>';
+  hdr.style.cssText='font-size:10px;font-weight:500;color:var(--text3);background:none;padding:2px 10px;min-height:auto;grid-template-columns:80px 1fr 1fr 120px 1fr';
+  hdr.innerHTML='<div>氏名</div><div>本年度付与</div><div>前年度繰越</div><div>消化合計／残</div><div>時間年休</div>';
   list.appendChild(hdr);
   STAFF.forEach(name=>{
-    const nd=nenkyuData[name]||{grant:0,carry:0};const nk=calcNenkyu(name);
+    const nd=nenkyuData[name]||{grant:0,carry:0,hourLimit:16};const nk=calcNenkyu(name);
     const row=document.createElement('div');row.className='nk-row';
+    row.style.cssText='grid-template-columns:80px 1fr 1fr 120px 1fr';
     const cls=nk.remain<0?'c-over':nk.remain<=5?'c-warn':'c-ok';
-    row.innerHTML=`<div class="nk-name">${name.split(' ')[0]}</div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="${nd.grant||0}" onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0};nenkyuData['${name}'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="${nd.carry||0}" onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0};nenkyuData['${name}'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div><div class="nk-status ${cls}">消化${nk.consumed}日 ／ 残${nk.remain}日</div>`;
+    const hourOver=nk.hourUsed>nk.hourLimit;
+    const hourCls=hourOver?'c-over':nk.hourRemain<=3?'c-warn':'';
+    row.innerHTML=`<div class="nk-name">${name.split(' ')[0]}</div>
+      <div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="${nd.grant||0}" onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0,hourLimit:16};nenkyuData['${name}'].grant=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div>
+      <div class="nk-inp-wrap"><input type="number" class="nk-inp" min="0" max="40" value="${nd.carry||0}" onchange="if(!nenkyuData['${name}'])nenkyuData['${name}']={grant:0,carry:0,hourLimit:16};nenkyuData['${name}'].carry=parseFloat(this.value)||0;saveAll();renderNenkyuPanel()"><span style="font-size:11px;color:var(--text2)">日</span></div>
+      <div class="nk-status ${cls}">消化${nk.consumed}日 ／ 残${nk.remain}日</div>
+      <div class="${hourCls}" style="font-size:11px;font-weight:500">
+        ${nk.hourUsed}h使用 / 残${nk.hourRemain}h
+        ${nk.hourCarryDays>0?`<br><span style="font-size:10px;color:#185FA5">繰越予定+${nk.hourCarryDays}日</span>`:''}
+        ${hourOver?`<br><span style="font-size:10px;color:#991b1b">⚠上限超過</span>`:''}
+      </div>`;
     list.appendChild(row);
   });
 }
 function updateNenkyu(){
-  if(!confirm('有給を更新します。現在の残日数が前年度繰越にセットされます。'))return;
-  STAFF.forEach(name=>{const nk=calcNenkyu(name);if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0};nenkyuData[name].carry=Math.max(0,nk.remain);nenkyuData[name].grant=0;});
+  if(!confirm('有給を更新します。現在の残日数（＋時間年休繰越分）が前年度繰越にセットされます。\n時間年休カウンターはリセットされます。'))return;
+  STAFF.forEach(name=>{
+    const nk=calcNenkyu(name);
+    if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0,hourLimit:16};
+    // 時間年休繰越分（8h単位切り捨て）を日単位有給繰越に加算
+    nenkyuData[name].carry=Math.max(0,nk.remain)+nk.hourCarryDays;
+    nenkyuData[name].grant=0;
+    // 時間年休使用分をschedDataからリセット（全月のhフィールドを0に）
+    Object.keys(schedData).forEach(m=>{
+      const sched=schedData[+m]?.[name];if(!sched)return;
+      schedData[+m][name]=sched.map(cell=>({k:cellKey(cell),h:0}));
+    });
+  });
   saveAll();renderNenkyuPanel();alert('繰越を更新しました。本年度付与日数を入力してください。');
 }
 
@@ -2089,7 +2211,7 @@ function initAll(){
 
   document.getElementById('month-label').textContent=`${year}年 ${month}月`;
   document.getElementById('logo-text').innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
-  STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0};});
+  STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0,hourLimit:16};});
   if(!tochoDays[month])tochoDays[month]=new Set();
   getShukyuKijunYear(year); // 現在年のデータがなければ初期化
   ensureSchedule(month);
