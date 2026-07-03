@@ -730,6 +730,7 @@ let SHIFTS=[
   {k:'nenkyu',l:'年休',      bg:'#fce7f3',fg:'#9d174d',count:1,  group:'有給',visible:true},
   {k:'ampms', l:'午前(週休)',bg:'#ede9fe',fg:'#4c1d95',count:0.5,group:'週休',visible:true},
   {k:'ampmn', l:'午前(年休)',bg:'#ffedd5',fg:'#7c2d12',count:0.5,group:'有給',visible:true},
+  {k:'hanshu_hannen',l:'半週/半年',bg:'#ccfbf1',fg:'#0f766e',count:0.5,group:'週休',visible:true},
   {k:'empty', l:'―',         bg:'#f0efe9',fg:'#a09e97',count:0,  group:'なし',visible:true},
 ];
 let GROUPS=[
@@ -1213,7 +1214,7 @@ function showDetailLimit(d,dd){
   document.getElementById('db-kibou').style.display='none';
   document.getElementById('comment-inp').value=dd.comment||'';
   const btns=document.getElementById('ng-btns');btns.innerHTML='';
-  SHIFTS.filter(s=>s.visible&&!['empty','shukyu','nenkyu','ampms','ampmn'].includes(s.k)).forEach(s=>{
+  SHIFTS.filter(s=>s.visible&&!['empty','shukyu','nenkyu','ampms','ampmn','hanshu_hannen'].includes(s.k)).forEach(s=>{
     const btn=document.createElement('button');
     btn.className='ng-btn '+(dd.ng.has(s.k)?'ng':'ok');
     btn.style.background=s.bg;btn.style.color=s.fg;
@@ -1340,6 +1341,7 @@ function calcNenkyu(name){
       const k=cellKey(cell);
       if(k==='nenkyu')consumed+=1;
       if(k==='ampmn')consumed+=0.5;
+      if(k==='hanshu_hannen')consumed+=0.5;
       hourUsed+=cellHour(cell);
     });
   }
