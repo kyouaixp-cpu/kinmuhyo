@@ -730,7 +730,6 @@ let SHIFTS=[
   {k:'nenkyu',l:'年休',      bg:'#fce7f3',fg:'#9d174d',count:1,  group:'有給',visible:true},
   {k:'ampms', l:'午前(週休)',bg:'#ede9fe',fg:'#4c1d95',count:0.5,group:'週休',visible:true},
   {k:'ampmn', l:'午前(年休)',bg:'#ffedd5',fg:'#7c2d12',count:0.5,group:'有給',visible:true},
-  {k:'hanshu_hannen',l:'半週/半年',bg:'#ccfbf1',fg:'#0f766e',count:0.5,group:'週休',visible:true},
   {k:'empty', l:'―',         bg:'#f0efe9',fg:'#a09e97',count:0,  group:'なし',visible:true},
 ];
 let GROUPS=[
@@ -765,6 +764,8 @@ const isSun=(y,m,d)=>getDow(y,m,d)===0;
 const isHol=(y,m,d)=>getHolidays(y,m).has(d);
 const cellCls=(y,m,d)=>isHol(y,m,d)?'hol':isSun(y,m,d)?'sun':isSat(y,m,d)?'sat':'normal';
 const shiftByKey=k=>SHIFTS.find(s=>s.k===k)||SHIFTS[SHIFTS.length-1];
+// 独自の集計列を持つグループのみ抽出（special='shukyu_nenkyu' は週休・有給に数値を足し込むだけで自身の列は持たない）
+const visibleColumnGroups=()=>GROUPS.filter(g=>g.visible!==false&&g.special!=='shukyu_nenkyu');
 const isTochoDay=(m,d)=>(tochoDays[m] instanceof Set)&&tochoDays[m].has(d);
 
 function ensureDay(name,m,d){
@@ -1214,7 +1215,13 @@ function showDetailLimit(d,dd){
   document.getElementById('db-kibou').style.display='none';
   document.getElementById('comment-inp').value=dd.comment||'';
   const btns=document.getElementById('ng-btns');btns.innerHTML='';
-  SHIFTS.filter(s=>s.visible&&!['empty','shukyu','nenkyu','ampms','ampmn','hanshu_hannen'].includes(s.k)).forEach(s=>{
+  SHIFTS.filter(s=>{
+    if(!s.visible||s.k==='empty')return false;
+    const grp=GROUPS.find(g=>g.name===s.group);
+    // 週休・有給・週休+有給（同時反映）系のグループに属する休暇シフトはNG指定対象から除外
+    if(grp&&['shukyu','nenkyu','shukyu_nenkyu'].includes(grp.special))return false;
+    return true;
+  }).forEach(s=>{
     const btn=document.createElement('button');
     btn.className='ng-btn '+(dd.ng.has(s.k)?'ng':'ok');
     btn.style.background=s.bg;btn.style.color=s.fg;
@@ -1341,7 +1348,10 @@ function calcNenkyu(name){
       const k=cellKey(cell);
       if(k==='nenkyu')consumed+=1;
       if(k==='ampmn')consumed+=0.5;
-      if(k==='hanshu_hannen')consumed+=0.5;
+      // 「週休+有給（同時反映）」グループに属するシフトは、そのカウント分を有給消化にも加算
+      const sh=shiftByKey(k);
+      const shGrp=GROUPS.find(g=>g.name===sh.group);
+      if(shGrp&&shGrp.special==='shukyu_nenkyu')consumed+=(sh.count||0);
       hourUsed+=cellHour(cell);
     });
   }
@@ -1484,7 +1494,7 @@ function renderAdmin(){
     th.innerHTML=`${d}<br><span style="font-size:9px">${DOW[getDow(year,month,d)]}</span>${isHolDay?'<br><span style="font-size:7px">祝</span>':''}${isTD?'<br><span style="font-size:7px">当</span>':''}`;
     tr.appendChild(th);
   }
-  GROUPS.filter(g=>g.visible!==false).forEach(g=>{
+  visibleColumnGroups().forEach(g=>{
     const label=g.special==='nenkyu'?'有給残':g.name+'計';
     const th=document.createElement('th');th.className='th-sum';th.textContent=label;tr.appendChild(th);
   });
@@ -1527,8 +1537,8 @@ function renderAdmin(){
         grpSums[sh.group]+=(grp&&grp.special==='taiki')?1:(sh.count||0);
       }
     }
-    GROUPS.filter(g=>g.visible!==false).forEach(g=>{
-      const v=grpSums[g.name]||0;
+    visibleColumnGroups().forEach(g=>{
+      let v=grpSums[g.name]||0;
       const td=document.createElement('td');td.className='td-sum';
       if(g.special==='nenkyu'){
         // 有給残
@@ -1536,6 +1546,8 @@ function renderAdmin(){
         td.textContent=nk.remain<0?`${nk.remain}日`:`残${nk.remain}日`;
         td.className='td-sum '+(nk.remain<0?'c-over':nk.remain<=5?'c-warn':'c-ok');
       } else if(g.special==='shukyu'){
+        // 「週休+有給（同時反映）」グループの分も週休計に合算
+        GROUPS.forEach(g2=>{if(g2.special==='shukyu_nenkyu')v+=grpSums[g2.name]||0;});
         const kijun=(shukyuKijun[year]&&shukyuKijun[year][month])||8;const diff=v-kijun;
         const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
         td.textContent=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
@@ -1562,7 +1574,7 @@ function renderAdmin(){
     else{td.style.background='#f0efe9';td.style.color='#a09e97';}
     ftr.appendChild(td);
   }
-  GROUPS.filter(g=>g.visible!==false).forEach(()=>ftr.appendChild(document.createElement('td')));
+  visibleColumnGroups().forEach(()=>ftr.appendChild(document.createElement('td')));
   tfoot.appendChild(ftr);
   // 待機者行
   const ftr2=document.createElement('tr');ftr2.className='taiki-row';
@@ -1573,7 +1585,7 @@ function renderAdmin(){
     else{td.textContent='—';td.style.color='#a09e97';}
     ftr2.appendChild(td);
   }
-  GROUPS.filter(g=>g.visible!==false).forEach(()=>ftr2.appendChild(document.createElement('td')));
+  visibleColumnGroups().forEach(()=>ftr2.appendChild(document.createElement('td')));
   tfoot.appendChild(ftr2);
 
   // alerts
@@ -1671,13 +1683,13 @@ function exportExcel(){
   });
   ws.pageSetup.margins={left:0.5,right:0.5,top:0.75,bottom:0.75,header:0.3,footer:0.3};
 
-  const totalCols=1+days+GROUPS.filter(g=>g.visible!==false).length;
+  const totalCols=1+days+visibleColumnGroups().length;
 
   // 列幅設定
   ws.getColumn(1).width=10;
   for(let d=1;d<=days;d++)ws.getColumn(1+d).width=5.5;
   let ci=2+days;
-  GROUPS.filter(g=>g.visible!==false).forEach(()=>{ ws.getColumn(ci++).width=8; });
+  visibleColumnGroups().forEach(()=>{ ws.getColumn(ci++).width=8; });
 
   // ── 行1: タイトル（背景なし・文字黒）──
   const titleRow=ws.getRow(1);
@@ -1708,7 +1720,7 @@ function exportExcel(){
     cell.style=makeStyle(bg,fg,true,'center');
   }
   let hci=2+days;
-  GROUPS.filter(g=>g.visible!==false).forEach(g=>{
+  visibleColumnGroups().forEach(g=>{
     const label=g.special==='nenkyu'?'有給残':g.name+'計';
     hdrRow.getCell(hci).value=label;
     hdrRow.getCell(hci).style=makeStyle('#e0e7ff','#3730a3',true,'center');
@@ -1740,9 +1752,9 @@ function exportExcel(){
       }
     }
 
-    // 集計列（GROUPSの順・visible=trueのみ）
+    // 集計列（GROUPSの順・visible=trueのみ・列を持たないshukyu_nenkyuグループは除く）
     let sci=2+days;
-    GROUPS.filter(g=>g.visible!==false).forEach(g=>{
+    visibleColumnGroups().forEach(g=>{
       const gcell=row.getCell(sci++);
       if(g.special==='nenkyu'){
         const nk=calcNenkyu(name);
@@ -1751,7 +1763,9 @@ function exportExcel(){
         const nfg=nk.remain<0?'#A32D2D':nk.remain<=5?'#854F0B':'#27500A';
         gcell.style=makeStyle(nbg,nfg,true,'center');
       } else if(g.special==='shukyu'){
-        const v=grpSums[g.name]||0;
+        let v=grpSums[g.name]||0;
+        // 「週休+有給（同時反映）」グループの分も週休計に合算
+        GROUPS.forEach(g2=>{if(g2.special==='shukyu_nenkyu')v+=grpSums[g2.name]||0;});
         const kijun=(shukyuKijun[year]&&shukyuKijun[year][month])||8;const diff=v-kijun;
         const fmt=n=>Number.isInteger(n)?n:n.toFixed(1);
         gcell.value=diff===0?`${fmt(v)} ±0`:diff>0?`${fmt(v)} +${fmt(diff)}`:`${fmt(v)} ${fmt(diff)}`;
@@ -1800,7 +1814,7 @@ function exportExcel(){
     }
   }
   // 集計列の空セル（列数合わせ）
-  {let tci=2+days;GROUPS.filter(g=>g.visible!==false).forEach(()=>{const c=tochoRow.getCell(tci++);c.value='';c.style=makeStyle('#f0efe9','#a09e97',false,'center');});}
+  {let tci=2+days;visibleColumnGroups().forEach(()=>{const c=tochoRow.getCell(tci++);c.value='';c.style=makeStyle('#f0efe9','#a09e97',false,'center');});}
 
   // ── 待機者行 ──
   const taikiRow=ws.getRow(tochoRowNum+1);
@@ -1816,7 +1830,7 @@ function exportExcel(){
     cell.style=makeStyle('#f0fdf4','#166634',false,'center');
   }
   // 集計列の空セル（列数合わせ）
-  {let tkci=2+days;GROUPS.filter(g=>g.visible!==false).forEach(()=>{const c=taikiRow.getCell(tkci++);c.value='';c.style=makeStyle('#f0fdf4','#166634',false,'center');});}
+  {let tkci=2+days;visibleColumnGroups().forEach(()=>{const c=taikiRow.getCell(tkci++);c.value='';c.style=makeStyle('#f0fdf4','#166634',false,'center');});}
 
   // ── ダウンロード ──
   wb.xlsx.writeBuffer().then(buf=>{
@@ -2015,6 +2029,7 @@ function renderShiftList(){
       {v:'shukyu',label:'週休（差分表示）', match:g.special==='shukyu'},
       {v:'nenkyu',label:'有給（残日数）',   match:g.special==='nenkyu'},
       {v:'taiki', label:'待機（回数）',     match:g.special==='taiki'},
+      {v:'shukyu_nenkyu',label:'週休+有給（同時反映・列非表示）',match:g.special==='shukyu_nenkyu'},
     ].map(o=>`<option value="${o.v}"${o.match?' selected':''}>${o.label}</option>`).join('');
     row.innerHTML=`
       <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
