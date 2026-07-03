@@ -691,6 +691,7 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
   <div class="pk-box" id="pk-box" onclick="event.stopPropagation()">
     <div class="pk-info" id="pk-info"></div>
     <div class="pk-shifts" id="pk-shifts"></div>
+    <div id="pk-hour-section"></div>
     <button class="pk-close" onclick="closePicker()">閉じる</button>
   </div>
 </div>
@@ -1840,19 +1841,19 @@ function openPicker(name,d,td,e){
     btn.onclick=()=>{assignShift(name,d,s.k);closePicker();renderAdmin();};
     shiftsEl.appendChild(btn);
   });
-  // 時間年休セクション
+  // 時間年休セクション（固定コンテナの中身を毎回上書き。要素を追加し続けない）
   const curCell=schedData[month]?.[name]?.[d-1]||{k:'empty',h:0};
   const curH=cellHour(curCell);
   const nk=calcNenkyu(name);
   const hourOver=nk.hourUsed>nk.hourLimit;
-  const hourDiv=document.createElement('div');
-  hourDiv.style.cssText='margin-top:8px;padding-top:8px;border-top:1px solid var(--border)';
-  hourDiv.innerHTML=`<div style="font-size:11px;font-weight:500;color:var(--text2);margin-bottom:5px">時間年休（この日）</div>
+  const hourSection=document.getElementById('pk-hour-section');
+  hourSection.innerHTML=`<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+    <div style="font-size:11px;font-weight:500;color:var(--text2);margin-bottom:5px">時間年休（この日）</div>
     <div style="display:flex;gap:4px;margin-bottom:5px" id="pk-hour-btns"></div>
     <div style="font-size:10px;color:${hourOver?'#991b1b':'#7c2d12'};padding:3px 6px;background:${hourOver?'#fee2e2':'#ffedd5'};border-radius:4px">
       今年度使用: ${nk.hourUsed}h　残: ${nk.hourRemain}h / ${nk.hourLimit}h
-    </div>`;
-  shiftsEl.parentNode.insertBefore(hourDiv,shiftsEl.nextSibling);
+    </div>
+  </div>`;
   const hBtns=document.getElementById('pk-hour-btns');
   [0,1,2,3].forEach(hv=>{
     const b=document.createElement('button');
