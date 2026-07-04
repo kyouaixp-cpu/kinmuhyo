@@ -1349,10 +1349,7 @@ function calcNenkyu(name){
       const sh=SHIFTS.find(s=>s.k===k);
       if(!sh){hourUsed+=cellHour(cell);return;}
       const shGrp=GROUPS.find(g=>g.name===sh.group);
-      if(shGrp&&(shGrp.special==='nenkyu'||shGrp.special==='shukyu_nenkyu')){
-        console.log('[DEBUG]',name,mo+'月',k,sh.count,shGrp.special);
-        consumed+=(sh.count||0);
-      }
+      if(shGrp&&(shGrp.special==='nenkyu'||shGrp.special==='shukyu_nenkyu'))consumed+=(sh.count||0);
       hourUsed+=cellHour(cell);
     });
   }
