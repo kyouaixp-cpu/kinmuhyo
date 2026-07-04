@@ -1346,12 +1346,10 @@ function calcNenkyu(name){
     const sched=schedData[mo]?.[name];if(!sched)continue;
     sched.forEach(cell=>{
       const k=cellKey(cell);
-      // SHIFTSから直接取得（見つからない場合はundefined、デフォルト返しによる誤加算を防ぐ）
       const sh=SHIFTS.find(s=>s.k===k);
       if(!sh){hourUsed+=cellHour(cell);return;}
       const shGrp=GROUPS.find(g=>g.name===sh.group);
-      if(shGrp&&shGrp.special==='nenkyu')consumed+=(sh.count||0);
-      if(shGrp&&shGrp.special==='shukyu_nenkyu')consumed+=(sh.count||0);
+      if(shGrp&&(shGrp.special==='nenkyu'||shGrp.special==='shukyu_nenkyu'))consumed+=(sh.count||0);
       hourUsed+=cellHour(cell);
     });
   }
