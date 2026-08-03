@@ -290,6 +290,9 @@ body{font-family:'Noto Sans JP',sans-serif;background:var(--bg);color:var(--text
 .yk-total{border:2px solid #378ADD;background:#E6F1FB;border-radius:var(--rs);padding:8px 10px}
 .yk-total .yk-label{color:#185FA5}
 .yk-total .yk-val{color:#0C447C}
+.yk-total-head{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+.yk-hour-chip{font-size:12px;font-weight:700;font-family:'DM Mono',monospace;color:#0C447C;background:#fff;border:1px solid #B5D4F4;border-radius:4px;padding:1px 7px}
+.yk-hour-chip:empty{display:none}
 .bar-wrap{margin-bottom:4px}
 .bar-track{height:8px;border-radius:4px;background:var(--surface2);overflow:hidden;display:flex}
 .bar-carry{background:#E24B4A;height:100%}
@@ -538,7 +541,7 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
             <div class="yk-val" id="yk-consumed" style="color:#27500A">—</div>
             <div class="yk-sub" id="yk-consumed-sub"></div>
           </div>
-          <div class="yk-item yk-total"><div class="yk-label">残り日数</div><div class="yk-val" id="yk-total">—</div><div class="yk-sub" id="yk-total-sub"></div></div>
+          <div class="yk-item yk-total"><div class="yk-label">残り日数</div><div class="yk-total-head"><span class="yk-val" id="yk-total">—</span><span class="yk-hour-chip" id="yk-hour-chip"></span></div><div class="yk-sub" id="yk-total-sub"></div></div>
         </div>
         <div class="bar-wrap">
           <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text2);margin-bottom:4px">
@@ -1360,10 +1363,15 @@ function calcNenkyu(name){
   const total=(nd.grant||0)+(nd.carry||0);
   const carryUsed=Math.min(consumed,nd.carry||0);
   const grantUsed=Math.max(0,consumed-(nd.carry||0));
+  const remain=Math.max(0,(nd.carry||0)-carryUsed)+Math.max(0,(nd.grant||0)-grantUsed);
+  // 時間年休を1時間でも使った分は8h単位で残り日数から先取りし、その日の残り時間をhourBlockRemainで表す
+  const hourDaysUsed=hourUsed>0?Math.ceil(hourUsed/8):0;
+  const hourBlockRemain=hourUsed>0?hourDaysUsed*8-hourUsed:0;
+  const remainDisplay=Math.max(0,remain-hourDaysUsed);
   return{grant:nd.grant||0,carry:nd.carry||0,total,consumed,carryUsed,grantUsed,
     carryRem:Math.max(0,(nd.carry||0)-carryUsed),grantRem:Math.max(0,(nd.grant||0)-grantUsed),
-    remain:Math.max(0,(nd.carry||0)-carryUsed)+Math.max(0,(nd.grant||0)-grantUsed),
-    hourUsed,hourRemain,hourLimit,hourCarryDays};
+    remain,remainDisplay,
+    hourUsed,hourRemain,hourLimit,hourCarryDays,hourDaysUsed,hourBlockRemain};
 }
 function renderYkCard(){
   const fy=getNenkyuFiscalYear();
@@ -1375,11 +1383,12 @@ function renderYkCard(){
   document.getElementById('yk-grant-sub').textContent=`残${nk.grantRem}日（消化${nk.grantUsed}日）`;
   document.getElementById('yk-consumed').textContent=nk.consumed+'日';
   document.getElementById('yk-consumed-sub').textContent=`繰越${nk.carryUsed}日 + 本年度${nk.grantUsed}日`;
-  document.getElementById('yk-total').textContent=nk.remain+'日';
+  document.getElementById('yk-total').textContent=nk.remainDisplay+'日';
+  document.getElementById('yk-hour-chip').textContent=nk.hourUsed>0?`+ ${nk.hourBlockRemain}h`:'';
   document.getElementById('yk-total-sub').textContent=`繰越消化残${nk.carryRem}日 + 本年度消化残${nk.grantRem}日`;
-  const remTxt=nk.remain>=0?`残${nk.remain}日`:`超過${Math.abs(nk.remain)}日`;
+  const remTxt=nk.remainDisplay>=0?`残${nk.remainDisplay}日`:`超過${Math.abs(nk.remainDisplay)}日`;
   const remEl=document.getElementById('yk-remain');
-  remEl.textContent=remTxt;remEl.style.color=nk.remain<0?'#991b1b':nk.remain<=5?'#92400e':'#27500A';
+  remEl.textContent=remTxt;remEl.style.color=nk.remainDisplay<0?'#991b1b':nk.remainDisplay<=5?'#92400e':'#27500A';
   const pct=nk.total>0?100/nk.total:0;
   document.getElementById('bar-carry').style.width=Math.min(nk.carryUsed*pct,100)+'%';
   document.getElementById('bar-curr').style.width=Math.min(nk.grantUsed*pct,100)+'%';
