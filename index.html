@@ -224,6 +224,8 @@ body{font-family:'Noto Sans JP',sans-serif;background:var(--bg);color:var(--text
 .btn.primary:hover{opacity:.85}
 .btn.danger{background:#fee2e2;color:#991b1b;border-color:#fecaca}
 .btn.warn{background:#FAEEDA;color:#854F0B;border-color:#EF9F27}
+.btn.confirmed{background:#EAF3DE;color:#27500A;border-color:#86efac}
+.cal-cell .sched-badge{font-size:11px;font-weight:700;margin-top:2px;padding:1px 4px;border-radius:3px;line-height:1.4}
 .leg{font-size:10px;font-weight:500;padding:3px 8px;border-radius:4px}
 .note-box{font-size:11px;color:var(--text2);line-height:1.6;padding:8px 10px;background:var(--surface2);border-radius:var(--rs);margin-top:6px}
 
@@ -613,6 +615,7 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
     <div id="admin-legend" style="display:flex;gap:4px;flex-wrap:wrap;flex:1"></div>
     <button class="btn warn" onclick="resetMonth()">当月リセット</button>
     <button class="btn primary" onclick="exportExcel()">Excelで出力</button>
+    <button class="btn" id="btn-confirm-month" onclick="toggleConfirmMonth()">確定</button>
   </div>
   <div class="alert-bar" id="alert-bar"></div>
   <div class="tbl-wrap">
@@ -745,6 +748,7 @@ let GROUPS=[
 let shukyuKijun={};  // { year: { month: days } } 年→月の2次元構造
 // 初期値（現在の年をデフォルトで生成するのはinitAll時）
 let tochoDays={};
+let confirmedMonths={}; // { month: true } 勤務表が確定済みの月
 // staffData[name][month][day] = {wish, limit, ng:Set, comment, kibou:shiftKey}
 let staffData={};
 let schedData={};
@@ -878,6 +882,10 @@ function restoreFromData(data){
     tochoDays={};
     Object.entries(data.tochoDays).forEach(([m,a])=>{tochoDays[+m]=new Set(a);});
   }
+  if(data.confirmedMonths){
+    confirmedMonths={};
+    Object.entries(data.confirmedMonths).forEach(([m,v])=>{confirmedMonths[+m]=!!v;});
+  }
   if(data.nenkyuData){
     nenkyuData=data.nenkyuData;
     // hourLimit が未設定の場合デフォルト16をセット
@@ -924,6 +932,7 @@ function saveAll(){
     GROUPS: JSON.parse(JSON.stringify(GROUPS)),
     shukyuKijun: JSON.parse(JSON.stringify(shukyuKijun)),
     tochoDays: serializeTochoDays(),
+    confirmedMonths: JSON.parse(JSON.stringify(confirmedMonths)),
     staffData: serializeStaffData(staffData),
     schedData: serializeSchedData(schedData),
     nenkyuData: JSON.parse(JSON.stringify(nenkyuData)),
@@ -1115,17 +1124,20 @@ function setMode(m){
 
 /* ══ STAFF CALENDAR ══ */
 function renderStaffCal(){
+  const isConfirmed=!!confirmedMonths[month];
   const leg=document.getElementById('stf-cal-legend');
   leg.innerHTML=`
     <span class="leg" style="background:var(--s-wish);color:var(--f-wish)">● 希望休</span>
     <span class="leg" style="background:var(--s-limit);color:var(--f-limit)">▲ 勤務条件</span>
     <span class="leg" style="background:var(--s-kibou);color:var(--f-kibou)">★ 希望勤務</span>
     <span class="leg" style="background:#dbeafe;color:#1e40af">土</span>
-    <span class="leg" style="background:#fee2e2;color:#991b1b">日・祝</span>`;
+    <span class="leg" style="background:#fee2e2;color:#991b1b">日・祝</span>
+    ${isConfirmed?'<span class="leg" style="background:#EAF3DE;color:#27500A">✓ 勤務表確定済み</span>':''}`;
   document.getElementById('sum-month').textContent=`${month}月`;
   const grid=document.getElementById('stf-cal');grid.innerHTML='';
   const fd=firstDow(year,month),days=daysInMonth(year,month);
   const hols=getHolidays(year,month);
+  if(isConfirmed)ensureSchedule(month);
   for(let i=0;i<fd;i++){const e=document.createElement('div');e.className='cal-cell empty';grid.appendChild(e);}
   for(let d=1;d<=days;d++){
     const dd=staffData[currentStaff]?.[month]?.[d]||{};
@@ -1144,6 +1156,14 @@ function renderStaffCal(){
     if(hasWish)txt+='<span class="dot">●</span>';
     if(hasKibou)txt+='<span class="dot" style="color:#166534">★'+(shiftByKey(dd.kibou).l)+'</span>';
     else if(hasLimit&&!hasWish&&!hasKibou)txt+='<span class="dot">▲</span>';
+    if(isConfirmed){
+      const schedCell=schedData[month]?.[currentStaff]?.[d-1];
+      if(schedCell){
+        const sh=shiftByKey(cellKey(schedCell));
+        const h=cellHour(schedCell);
+        txt+=`<span class="sched-badge" style="background:${sh.bg};color:${sh.fg}">${sh.l}${h>0?` ${h}h`:''}</span>`;
+      }
+    }
     cell.innerHTML=txt;
     cell.onclick=()=>tapDay(d);
     grid.appendChild(cell);
@@ -1482,6 +1502,12 @@ function renderAdmin(){
   ensureSchedule(month);
   const days=daysInMonth(year,month);
   const hols=getHolidays(year,month);
+  const confirmBtn=document.getElementById('btn-confirm-month');
+  if(confirmBtn){
+    const isConfirmed=!!confirmedMonths[month];
+    confirmBtn.textContent=isConfirmed?'✓ 確定済み（解除）':'確定';
+    confirmBtn.classList.toggle('confirmed',isConfirmed);
+  }
   const legEl=document.getElementById('admin-legend');legEl.innerHTML='';
   SHIFTS.filter(s=>s.visible).forEach(s=>{
     const span=document.createElement('span');span.className='leg';span.style.background=s.bg;span.style.color=s.fg;span.textContent=s.l;legEl.appendChild(span);
@@ -1650,6 +1676,17 @@ function renderAdmin(){
   });
 }
 
+function toggleConfirmMonth(){
+  const isConfirmed=!!confirmedMonths[month];
+  if(!isConfirmed){
+    if(!confirm(`${month}月の勤務表を確定します。\n各スタッフの「希望入力」カレンダーに確定した勤務が表示されるようになります。\n\nよろしいですか？`))return;
+    confirmedMonths[month]=true;
+  } else {
+    if(!confirm(`${month}月の確定を解除しますか？\n「希望入力」カレンダーの勤務表示が消えます。`))return;
+    delete confirmedMonths[month];
+  }
+  saveAll();renderAdmin();
+}
 function resetMonth(){
   if(!confirm(`${month}月の勤務割り当てをリセットします。\n希望休・希望勤務・勤務条件のデータは保持されます。\n\nよろしいですか？`))return;
   const days=daysInMonth(year,month);
