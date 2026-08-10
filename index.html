@@ -445,6 +445,9 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
   .nk-row>div:last-child{grid-column:span 3;padding-top:4px;border-top:1px solid var(--border)}
   .admin-top{gap:6px}
   .admin-top .btn{font-size:11px;padding:8px 10px;min-height:36px}
+  /* 凡例が長くボタンまで届きにくいため、モバイルではボタンを凡例より先に表示 */
+  .admin-top .btn{order:1}
+  #admin-legend{order:2;width:100%}
   .pk-box{width:95vw;max-width:360px}
   .stf-hdr{gap:6px}
   .mpill{padding:8px 10px;font-size:11px}
