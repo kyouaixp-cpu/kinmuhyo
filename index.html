@@ -447,7 +447,8 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
   .admin-top .btn{font-size:11px;padding:8px 10px;min-height:36px}
   /* 凡例が長くボタンまで届きにくいため、モバイルではボタンを凡例より先に表示 */
   .admin-top .btn{order:1}
-  #admin-legend{order:2;width:100%}
+  #admin-legend{order:2;width:100%;flex-wrap:nowrap!important;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}
+  #admin-legend .leg{flex-shrink:0}
   .pk-box{width:95vw;max-width:360px}
   .stf-hdr{gap:6px}
   .mpill{padding:8px 10px;font-size:11px}
