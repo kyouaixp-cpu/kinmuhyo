@@ -9,7 +9,7 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-  import { getDatabase, ref, set, onValue }
+  import { getDatabase, ref, set, update, onValue }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
   const firebaseConfig = {
@@ -73,7 +73,10 @@
       _saveTimer = null;
       if(!auth.currentUser){ window._isSaving = false; return; }
       try {
-        await set(ref(db, 'kinmuhyo/shared'), _latestPayload);
+        // set()（丸ごと上書き）ではなくupdate()（部分マージ）を使う。
+        // payloadに含まれないキー（staffData/schedData/confirmedMonthsは専用の
+        // 粒度で個別保存されるためここには含まれない）はそのまま保持される。
+        await update(ref(db, 'kinmuhyo/shared'), _latestPayload);
         setTimeout(()=>{ window._isSaving = false; window._lastSavedJson = null; }, 8000);
       } catch(e) {
         window._isSaving = false;
@@ -82,6 +85,24 @@
         alert('保存に失敗しました。通信状況を確認してください。');
       }
     }, 500);
+  };
+
+  // ── 粒度分割保存（staffData/schedDataの衝突防止用） ──
+  // 理由：saveAll()で全状態を毎回丸ごと書き込むと、複数人が同時に別々の
+  //       スタッフ・日付を編集した際、お互いの変更を取りこぼして上書きし
+  //       合う競合が起きる（confirmedMonthsで実際に発生した不具合と同型）。
+  //       staffDataはスタッフ単位、schedDataは(月,スタッフ)単位で
+  //       Firebaseへ部分パスのupdate()を行い、無関係な編集同士が
+  //       干渉しないようにする。
+  window._fbUpdatePaths = async (pathValues) => {
+    if(!auth.currentUser) return;
+    if(!pathValues || !Object.keys(pathValues).length) return;
+    try {
+      await update(ref(db, 'kinmuhyo/shared'), pathValues);
+    } catch(e) {
+      console.error('部分保存エラー:', e);
+      alert('保存に失敗しました。通信状況を確認してください。');
+    }
   };
 
   // ── リアルタイム同期 ──
@@ -140,7 +161,7 @@
   window._fbSaveImmediate = async (payload) => {
     if(!auth.currentUser) return;
     try {
-      await set(ref(db, 'kinmuhyo/shared'), payload);
+      await update(ref(db, 'kinmuhyo/shared'), payload);
     } catch(e) {
       console.error('Firebase即時保存エラー:', e);
     }
@@ -967,9 +988,11 @@ function saveAll(){
     GROUPS: JSON.parse(JSON.stringify(GROUPS)),
     shukyuKijun: JSON.parse(JSON.stringify(shukyuKijun)),
     tochoDays: serializeTochoDays(),
-    // confirmedMonthsはここに含めない（専用パスで独立管理。理由は_fbSetConfirmedMonth付近のコメント参照）
-    staffData: serializeStaffData(staffData),
-    schedData: serializeSchedData(schedData),
+    // confirmedMonths・staffData・schedDataはここに含めない。
+    // 複数人が同時に別々のスタッフ・日付を編集した際、丸ごと上書きで
+    // お互いの変更を消してしまう競合を防ぐため、専用の粒度で個別保存する
+    // （confirmedMonths→_fbSetConfirmedMonth、staffData/schedData→
+    // saveStaffScoped/saveSchedScoped、まとめて全部書き換える場合はsaveAllFull）
     nenkyuData: JSON.parse(JSON.stringify(nenkyuData)),
     staffLinks: JSON.parse(JSON.stringify(staffLinks))
   };
@@ -979,6 +1002,52 @@ function saveAll(){
   if(typeof _currentSetPanel!=='undefined' && _currentSetPanel==='shifts'
      && document.getElementById('scr-settings')?.classList.contains('on')
      && typeof renderShiftList==='function') renderShiftList();
+}
+
+// staffDataをスタッフ単位、schedDataを(月,スタッフ)単位で部分保存する。
+// schedEntries省略時はstaffDataのみ保存（勤務条件の保存など、schedDataに
+// 変更がない操作用）。
+function saveStaffScoped(name, schedEntries){
+  if(typeof window._fbUpdatePaths!=='function') return;
+  const paths={};
+  paths['staffData/'+name]=serializeStaffData({[name]:staffData[name]||{}})[name]||{};
+  (schedEntries||[]).forEach(([m,nm])=>{
+    if(schedData[m]&&schedData[m][nm]){
+      paths['schedData/'+m+'/'+nm]=serializeSchedData({[m]:{[nm]:schedData[m][nm]}})[m][nm];
+    }
+  });
+  window._fbUpdatePaths(paths);
+}
+// schedDataのみを(月,スタッフ)単位で部分保存する（管理者の勤務割当編集用）
+function saveSchedScoped(entries){
+  if(typeof window._fbUpdatePaths!=='function') return;
+  const paths={};
+  (entries||[]).forEach(([m,nm])=>{
+    if(schedData[m]&&schedData[m][nm]){
+      paths['schedData/'+m+'/'+nm]=serializeSchedData({[m]:{[nm]:schedData[m][nm]}})[m][nm];
+    }
+  });
+  window._fbUpdatePaths(paths);
+}
+// 全項目を丸ごと保存する（スタッフ追加・削除、有給年次更新、バックアップ復元など、
+// 複数月・複数スタッフのstaffData/schedDataを一括で書き換える操作専用。
+// 通常の編集操作ではsaveAll()・saveStaffScoped()・saveSchedScoped()を使うこと）
+function saveAllFull(){
+  window._isSaving = true;
+  const payload={
+    cfg: JSON.parse(JSON.stringify(cfg)),
+    STAFF: [...STAFF],
+    SHIFTS: JSON.parse(JSON.stringify(SHIFTS)),
+    GROUPS: JSON.parse(JSON.stringify(GROUPS)),
+    shukyuKijun: JSON.parse(JSON.stringify(shukyuKijun)),
+    tochoDays: serializeTochoDays(),
+    staffData: serializeStaffData(staffData),
+    schedData: serializeSchedData(schedData),
+    nenkyuData: JSON.parse(JSON.stringify(nenkyuData)),
+    staffLinks: JSON.parse(JSON.stringify(staffLinks))
+  };
+  if(typeof window._fbSave==='function') window._fbSave(payload);
+  window._lastPayload = payload;
 }
 function loadAll(){
   // Firebase onValue で自動同期されるため、初期ロードはfalseを返す
@@ -1062,7 +1131,7 @@ function importData(e){
     try{
       const data=JSON.parse(ev.target.result);
       restoreFromData(data);
-      saveAll();initAll();alert('データを読み込みました');
+      saveAllFull();initAll();alert('データを読み込みました');
     }catch(err){alert('読み込みに失敗しました');}
   };
   reader.readAsText(file);e.target.value='';
@@ -1087,7 +1156,9 @@ function changeMonth(dir){
   month+=dir;if(month>12){month=1;year++;}if(month<1){month=12;year--;}
   if(year!==prevYear) _mskYear=year; // 年が変わったらパネルの選択年も追従
   document.getElementById('month-label').textContent=`${year}年 ${month}月`;
-  selectedDay=null;kibouSelected=null;hideDetail();ensureSchedule(month);saveAll();
+  // ensureSchedule()はローカルの表示用デフォルト補完のみ。各クライアントが
+  // 同じ規則で同じ値を導出できるため、月移動のたびにFirebaseへ再送する必要はない
+  selectedDay=null;kibouSelected=null;hideDetail();ensureSchedule(month);
   const active=document.querySelector('.scr.on').id;
   if(active==='scr-staff'){renderStaffCal();renderSummary();renderYkCard();renderICS();}
   if(active==='scr-admin')renderAdmin();
@@ -1226,7 +1297,7 @@ function tapDay(d){
       }
     }
     if(!dd.wish&&!dd.limit&&!dd.ng.size&&!dd.comment&&!dd.kibou)delete staffData[currentStaff][month][d];
-    saveAll();renderStaffCal();renderSummary();return;
+    saveStaffScoped(currentStaff,[[month,currentStaff]]);renderStaffCal();renderSummary();return;
   }
 
   if(currentMode==='kibou'){
@@ -1321,7 +1392,7 @@ function saveCondition(){
   dd.comment=document.getElementById('comment-inp').value.trim();
   if(!dd.ng.size&&!dd.comment)dd.limit=false;
   if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][month][selectedDay];
-  selectedDay=null;hideDetail();saveAll();renderStaffCal();renderSummary();
+  selectedDay=null;hideDetail();saveStaffScoped(currentStaff);renderStaffCal();renderSummary();
 }
 
 function saveKibou(){
@@ -1331,6 +1402,7 @@ function saveKibou(){
   dd.kibou=kibouSelected;
   // 管理者カレンダーに直接反映
   ensureSchedule(month);
+  let spilloverMonth=null;
   if(kibouSelected){
     const curH=cellHour(schedData[month][currentStaff][selectedDay-1]);
     schedData[month][currentStaff][selectedDay-1]={k:kibouSelected,h:curH};
@@ -1342,7 +1414,7 @@ function saveKibou(){
       } else {
         const nm=month===12?1:month+1;
         ensureSchedule(nm);
-        if(schedData[nm][currentStaff])schedData[nm][currentStaff][0]={k:'ake',h:0};
+        if(schedData[nm][currentStaff]){schedData[nm][currentStaff][0]={k:'ake',h:0};spilloverMonth=nm;}
       }
     }
   } else {
@@ -1354,7 +1426,9 @@ function saveKibou(){
     else{schedData[month][currentStaff][d-1]={k:'nikkn',h:curH};}
   }
   if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][month][selectedDay];
-  selectedDay=null;kibouSelected=null;hideDetail();saveAll();renderStaffCal();renderSummary();
+  const schedEntries=[[month,currentStaff]];
+  if(spilloverMonth)schedEntries.push([spilloverMonth,currentStaff]);
+  selectedDay=null;kibouSelected=null;hideDetail();saveStaffScoped(currentStaff,schedEntries);renderStaffCal();renderSummary();
 }
 
 function renderSummary(){
@@ -1392,7 +1466,7 @@ function deleteEntry(d){
     }
   }
   if(selectedDay===+d){selectedDay=null;kibouSelected=null;hideDetail();}
-  saveAll();renderStaffCal();renderSummary();
+  saveStaffScoped(currentStaff,[[month,currentStaff]]);renderStaffCal();renderSummary();
 }
 
 /* ══ NENKYU CARD ══ */
@@ -1740,7 +1814,7 @@ function resetMonth(){
       schedData[month][name].push({k,h:0});
     }
   });
-  saveAll();renderAdmin();
+  saveSchedScoped(STAFF.map(name=>[month,name]));renderAdmin();
 }
 
 function exportExcel(){
@@ -1968,18 +2042,21 @@ function assignShift(name,d,k){
   if(!schedData[month])schedData[month]={};ensureSchedule(month);
   const curH=cellHour(schedData[month][name][d-1]);
   schedData[month][name][d-1]={k,h:curH};
+  let spilloverMonth=null;
   if(k==='tocho'&&cfg.autoAke){
     const days=daysInMonth(year,month);
     if(d<days){schedData[month][name][d]={k:'ake',h:0};}
-    else{const nm=month===12?1:month+1;ensureSchedule(nm);if(schedData[nm][name])schedData[nm][name][0]={k:'ake',h:0};}
+    else{const nm=month===12?1:month+1;ensureSchedule(nm);if(schedData[nm][name]){schedData[nm][name][0]={k:'ake',h:0};spilloverMonth=nm;}}
   }
-  saveAll();
+  const entries=[[month,name]];
+  if(spilloverMonth)entries.push([spilloverMonth,name]);
+  saveSchedScoped(entries);
 }
 function assignHour(name,d,h){
   if(!schedData[month])schedData[month]={};ensureSchedule(month);
   const curK=cellKey(schedData[month][name][d-1]);
   schedData[month][name][d-1]={k:curK,h};
-  saveAll();
+  saveSchedScoped([[month,name]]);
 }
 
 /* ══ SETTINGS ══ */
@@ -2050,7 +2127,7 @@ function addStaff(){
   if(STAFF.includes(name)){alert('同じ名前のスタッフがすでにいます');return;}
   STAFF.push(name);if(!staffData[name])staffData[name]={};if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0};
   Object.keys(schedData).forEach(m=>{if(!schedData[m][name]){const days=daysInMonth(year,+m);schedData[m][name]=[];for(let d=1;d<=days;d++)schedData[m][name].push({k:(isSat(year,+m,d)||isSun(year,+m,d))?'shukyu':'nikkn',h:0});}});
-  inp.value='';saveAll();rebuildStaffSelect();renderStaffMgr();
+  inp.value='';saveAllFull();rebuildStaffSelect();renderStaffMgr();
 }
 function removeStaff(i){
   const name=STAFF[i];
@@ -2061,7 +2138,7 @@ function removeStaff(i){
   Object.keys(schedData).forEach(m=>delete schedData[m][name]);
   // 紐付けも削除
   Object.keys(staffLinks).forEach(uid=>{if(staffLinks[uid]===name)delete staffLinks[uid];});
-  saveAll();rebuildStaffSelect();renderStaffMgr();
+  saveAllFull();rebuildStaffSelect();renderStaffMgr();
 }
 
 /* ── Shift Customizer ── */
@@ -2301,7 +2378,7 @@ function updateNenkyu(){
       schedData[+m][name]=sched.map(cell=>({k:cellKey(cell),h:0}));
     });
   });
-  saveAll();renderNenkyuPanel();alert('繰越を更新しました。本年度付与日数を入力してください。');
+  saveAllFull();renderNenkyuPanel();alert('繰越を更新しました。本年度付与日数を入力してください。');
 }
 
 /* ══ INIT ══ */

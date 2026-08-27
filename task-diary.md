@@ -166,5 +166,35 @@
 1. 有給カードの残り日数表示の実機動作確認（持ち越し継続）
 2. claude.ai側とClaude Code CLI側の編集ルール分担の検討（持ち越し継続）
 3. 今回のconfirmedMonths分離修正後、実際に複数端末で確定操作の競合が解消したかユーザーに確認してもらう
-4. 中長期的には、saveAll()のフルセット上書き方式自体を見直し、Firebaseのupdate()による部分更新に移行することを検討（他のデータでも同種の上書き競合が起こり得るため）
+
+## 2026-08-27（保存方式全体の見直し：Tier1+Tier2実施）
+
+### 今日やったこと
+- ユーザーから「保存方法の見直しが必要の可能性があるなら一度精査して提案してください」と依頼あり
+- `saveAll()`の全呼び出し箇所（約30箇所）を洗い出し、衝突リスクを精査。特に`tapDay`・`saveCondition`・`saveKibou`・`deleteEntry`（希望入力タブ、staffDataを毎回全スタッフ分丸ごと保存）が、複数スタッフが同時に希望休を入力する最も起こりやすいシナリオで、confirmedMonthsと同型の上書き事故を起こしうると特定
+- Tier1（`set()`→`update()`）・Tier2（staffData/schedDataの粒度分割）・Tier3（全項目粒度分割、過剰と判断し非採用）の3段階を提案し、Tier1+Tier2の実施で合意
+- 実装：
+  - Firebase importに`update`を追加。`_fbSave`・`_fbSaveImmediate`の`set()`を`update()`に変更（Tier1）
+  - `window._fbUpdatePaths(pathValues)`：複数の部分パスをまとめて`update()`する汎用ヘルパーを新設
+  - `saveStaffScoped(name, schedEntries)`：staffDataをスタッフ単位、schedDataを(月,スタッフ)単位で部分保存
+  - `saveSchedScoped(entries)`：schedDataのみ(月,スタッフ)単位で部分保存（管理者の勤務割当編集用）
+  - `saveAllFull()`：スタッフ追加・削除／有給年次更新／バックアップ復元など、複数月・複数スタッフを一括で書き換えるまれな操作専用に、従来通りの全項目保存を分離
+  - `saveAll()`本体からstaffData・schedDataを除外（confirmedMonthsは既に別パスなので対象外）
+  - 呼び出し側を全面的に置き換え：`tapDay`/`saveCondition`/`saveKibou`/`deleteEntry`→`saveStaffScoped`、`assignShift`/`assignHour`/`resetMonth`→`saveSchedScoped`、`addStaff`/`removeStaff`/`updateNenkyu`/`importData`→`saveAllFull`
+  - `saveKibou`・`assignShift`は当直→翌日「明け」自動セットで月をまたぐ場合があるため、スピルオーバー先の月も追加でschedEntriesに含めるよう対応
+  - 副次的に、`changeMonth()`内の（schedData除外後は意味を失った）`saveAll()`呼び出しを削除し、無駄なFirebase書き込みを削減
+- ブラウザプレビューで構文エラーなし・全関数の存在確認、ログインなし状態でのシミュレーション実行（tapDay/saveKibou/assignShift/assignHour）でエラーが出ないことを確認
+
+### 決定事項
+- staffDataはスタッフ単位、schedDataは(月,スタッフ)単位の粒度でFirebase保存する方針に統一
+- スタッフ追加・削除／有給年次更新／バックアップ復元のみ`saveAllFull()`で全項目保存を維持
+
+### 発見・気づき
+- Firebaseの`update()`は、渡したオブジェクトの各キー（`/`区切りのパスも可）だけを部分的に置き換え、含まれないキーは保持する。ただし「あるキーの値」自体は丸ごと置き換わるため、粒度を細かくしたいなら値そのものではなくキー（パス）を細分化する必要がある（例：`{staffData: {...全スタッフ}}`ではなく`{'staffData/畠山 智史': {...}}`のように）
+- 複数月にまたがる一括変更（スタッフ追加・削除、有給更新）は無理に粒度分割せず、素直に全項目保存にした方がシンプルで安全。粒度分割は「高頻度・少人数が同時に別々の対象を編集する」操作にのみ適用するのが費用対効果が良い
+
+### 次のステップ
+1. 有給カードの残り日数表示の実機動作確認（持ち越し継続）
+2. claude.ai側とClaude Code CLI側の編集ルール分担の検討（持ち越し継続）
+3. 今回の保存方式見直し後、実際に複数端末で希望休入力・確定操作の競合が解消したかユーザーに確認してもらう
 
