@@ -146,6 +146,37 @@
     }
   };
 
+  // ══════════════════════════════════════════
+  // 確定月（confirmedMonths）専用の保存／同期
+  //
+  // 理由：saveAll()はアプリ全体の状態を丸ごとset()で上書きするため、
+  //       他端末が「自分の保存直後の無視ウィンドウ」中に確定操作を
+  //       取りこぼすと、次の保存で古いconfirmedMonthsを丸ごと
+  //       上書きして確定が消えてしまう。confirmedMonthsだけ独立した
+  //       パスに分離し、他の状態保存の影響を受けないようにする。
+  // ══════════════════════════════════════════
+  window._fbSetConfirmedMonth = async (m, value) => {
+    if(!auth.currentUser) return;
+    try {
+      await set(ref(db, 'kinmuhyo/confirmedMonths/'+m), value?true:null);
+    } catch(e) {
+      console.error('確定状態の保存エラー:', e);
+      alert('確定状態の保存に失敗しました。通信状況を確認してください。');
+    }
+  };
+
+  let _fbConfirmedUnsubscribe = null;
+  window._fbStartConfirmedSync = () => {
+    if(_fbConfirmedUnsubscribe) return;
+    _fbConfirmedUnsubscribe = onValue(ref(db, 'kinmuhyo/confirmedMonths'), (snapshot) => {
+      const data = snapshot.val() || {};
+      confirmedMonths = {};
+      Object.entries(data).forEach(([m,v]) => { if(v) confirmedMonths[+m] = true; });
+      if(typeof renderAdmin === 'function' && document.getElementById('scr-admin')?.classList.contains('on')) renderAdmin();
+      if(typeof renderStaffCal === 'function' && document.getElementById('scr-staff')?.classList.contains('on')) renderStaffCal();
+    });
+  };
+
   // ── 認証状態の監視 ──
   onAuthStateChanged(auth, (user) => {
     const overlay = document.getElementById('login-overlay');
@@ -166,6 +197,7 @@
       window._currentUID   = user.uid;
       window._currentEmail = user.email || user.displayName || '';
       window._fbStartSync();
+      window._fbStartConfirmedSync();
     } else {
       // 未ログイン → ログインパネルを表示
       if(overlay) overlay.style.display = 'flex';
@@ -176,6 +208,7 @@
       window._currentEmail = '';
       // Firebaseリスナーを解除してフラグをリセット（再ログイン時に再登録できるよう）
       if(_fbUnsubscribe){ _fbUnsubscribe(); _fbUnsubscribe=null; }
+      if(_fbConfirmedUnsubscribe){ _fbConfirmedUnsubscribe(); _fbConfirmedUnsubscribe=null; }
       window._appInitialized = false;
     }
   });
@@ -886,10 +919,8 @@ function restoreFromData(data){
     tochoDays={};
     Object.entries(data.tochoDays).forEach(([m,a])=>{tochoDays[+m]=new Set(a);});
   }
-  if(data.confirmedMonths){
-    confirmedMonths={};
-    Object.entries(data.confirmedMonths).forEach(([m,v])=>{confirmedMonths[+m]=!!v;});
-  }
+  // confirmedMonthsは専用パス（kinmuhyo/confirmedMonths）で管理するため、
+  // この共有データブロックからは復元しない（_fbStartConfirmedSyncが担当）
   if(data.nenkyuData){
     nenkyuData=data.nenkyuData;
     // hourLimit が未設定の場合デフォルト16をセット
@@ -936,7 +967,7 @@ function saveAll(){
     GROUPS: JSON.parse(JSON.stringify(GROUPS)),
     shukyuKijun: JSON.parse(JSON.stringify(shukyuKijun)),
     tochoDays: serializeTochoDays(),
-    confirmedMonths: JSON.parse(JSON.stringify(confirmedMonths)),
+    // confirmedMonthsはここに含めない（専用パスで独立管理。理由は_fbSetConfirmedMonth付近のコメント参照）
     staffData: serializeStaffData(staffData),
     schedData: serializeSchedData(schedData),
     nenkyuData: JSON.parse(JSON.stringify(nenkyuData)),
@@ -1682,14 +1713,18 @@ function renderAdmin(){
 
 function toggleConfirmMonth(){
   const isConfirmed=!!confirmedMonths[month];
+  const m=month;
+  let newValue;
   if(!isConfirmed){
-    if(!confirm(`${month}月の勤務表を確定します。\n各スタッフの「希望入力」カレンダーに確定した勤務が表示されるようになります。\n\nよろしいですか？`))return;
-    confirmedMonths[month]=true;
+    if(!confirm(`${m}月の勤務表を確定します。\n各スタッフの「希望入力」カレンダーに確定した勤務が表示されるようになります。\n\nよろしいですか？`))return;
+    confirmedMonths[m]=true; newValue=true;
   } else {
-    if(!confirm(`${month}月の確定を解除しますか？\n「希望入力」カレンダーの勤務表示が消えます。`))return;
-    delete confirmedMonths[month];
+    if(!confirm(`${m}月の確定を解除しますか？\n「希望入力」カレンダーの勤務表示が消えます。`))return;
+    delete confirmedMonths[m]; newValue=false;
   }
-  saveAll();renderAdmin();
+  renderAdmin();
+  // confirmedMonthsは専用パスに直接書き込む（saveAll()の全体上書きに巻き込まれないようにするため）
+  if(typeof window._fbSetConfirmedMonth==='function') window._fbSetConfirmedMonth(m,newValue);
 }
 function resetMonth(){
   if(!confirm(`${month}月の勤務割り当てをリセットします。\n希望休・希望勤務・勤務条件のデータは保持されます。\n\nよろしいですか？`))return;
