@@ -2465,6 +2465,32 @@ window.addEventListener('beforeunload', () => {
     window._fbSaveImmediate(window._lastPayload);
   }
 });
+
+/* ══ モバイル専用: 希望入力カレンダーのスワイプで月切替 ══
+   PC版には影響を与えないよう、幅700px以下（既存のモバイル判定基準）の
+   ときだけ有効化する。日付タップと誤反応しないよう、横方向の移動量が
+   一定以上かつ縦方向より明確に大きい場合のみ月切替として扱う。 */
+(function(){
+  const calEl = document.getElementById('card-cal');
+  if(!calEl) return;
+  let touchStartX=0, touchStartY=0, tracking=false;
+  calEl.addEventListener('touchstart', e=>{
+    if(window.innerWidth>700 || e.touches.length!==1){ tracking=false; return; }
+    touchStartX=e.touches[0].clientX;
+    touchStartY=e.touches[0].clientY;
+    tracking=true;
+  }, {passive:true});
+  calEl.addEventListener('touchend', e=>{
+    if(!tracking) return;
+    tracking=false;
+    if(window.innerWidth>700) return;
+    const t=e.changedTouches[0];
+    const dx=t.clientX-touchStartX, dy=t.clientY-touchStartY;
+    if(Math.abs(dx)>50 && Math.abs(dx)>Math.abs(dy)*1.5){
+      changeMonth(dx<0?1:-1);
+    }
+  }, {passive:true});
+})();
 </script>
 </body>
 </html>
