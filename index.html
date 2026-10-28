@@ -733,9 +733,10 @@ th{background:var(--surface2);font-weight:500;color:var(--text2);padding:5px 4px
       </div>
       <div class="set-panel" id="sp-nenkyu">
         <div class="sec-label">有給管理（<span id="nk-year-label"></span>年度）</div>
+        <div id="nk-fy-info" style="font-size:11px;color:var(--text2);margin-bottom:8px;line-height:1.6"></div>
         <div id="nk-list"></div>
-        <div style="margin-top:12px"><button class="btn warn" onclick="updateNenkyu()">有給を更新する（10月）</button></div>
-        <div class="note-box">「有給を更新する」を押すと残日数が前年度繰越に自動セットされます。</div>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn warn" onclick="updateNenkyu()">有給を更新する（10月）</button><button class="btn" onclick="switchNenkyuYearOnly()">更新済みの場合：年度だけ切り替える</button></div>
+        <div class="note-box">有給の年度は10月〜翌9月です。「有給を更新する」を押すと、前年度の本年度付与のうち使わなかった日数（上限20日）が前年度繰越にセットされ、本年度付与は0に戻ります。新年度の付与日数は更新後に入力してください。すでに更新と付与日数の入力が済んでいる場合は、「年度だけ切り替える」を押してください（数字は変わりません）。</div>
       </div>
       <div class="set-panel" id="sp-data">
         <div class="sec-label">データ保存・読み込み</div>
@@ -810,6 +811,10 @@ let confirmedMonths={}; // { month: true } 勤務表が確定済みの月
 // staffData[name][month][day] = {wish, limit, ng:Set, comment, kibou:shiftKey}
 let staffData={};
 let schedData={};
+// schedYear[月][氏名] = その勤務データが何年分か（有給の年度集計用。schedDataは月ごとに1枠しかなく年の情報がないため）
+let schedYear={};
+// nenkyuFY = 現在の前年度繰越・本年度付与が対象としている有給年度（10月始まり。更新ボタンでのみ進める）
+let nenkyuFY;
 let nenkyuData={};
 let staffLinks={};   // { uid: staffName } Google IDとスタッフの紐付け
 let icsSelMonths=new Set();
@@ -854,7 +859,18 @@ function ensureSchedule(m){
     if(schedData[m][name].length>days)schedData[m][name].length=days;
   });
 }
-const getNenkyuFiscalYear=()=>month>=4?year:year-1;
+/* ── 有給の年度（10月〜翌9月） ── */
+const NENKYU_CARRY_LIMIT=20; // 前年度繰越の上限日数
+const fiscalYearOf=(y,m)=>m>=10?y:y-1; // 年月 → 有給年度（例：2026年10月〜2027年9月 → 2026年度）
+// 現在の前年度繰越・本年度付与が対象としている年度。更新ボタンを押すまでは日付から推定する
+// （10月以降でまだ更新前なら、前の年度のまま）
+const getNenkyuFiscalYear=()=>{
+  if(nenkyuFY!==undefined) return nenkyuFY;
+  const t=new Date(),m=t.getMonth()+1;
+  return fiscalYearOf(t.getFullYear(),m)-(m>=10?1:0);
+};
+// 有給年度fyにおいて、month月のデータが属する暦年（10〜12月はfy年、1〜9月はfy+1年）
+const calendarYearInFY=(fy,m)=>m>=10?fy:fy+1;
 
 /* ══ SERIALIZE ══ */
 function serializeStaffData(sd){
@@ -960,6 +976,14 @@ function restoreFromData(data){
       });
     });
   }
+  if(data.schedYear){
+    schedYear={};
+    Object.entries(data.schedYear).forEach(([m,mv])=>{
+      schedYear[+m]={};
+      if(mv) Object.entries(mv).forEach(([name,y])=>{schedYear[+m][name]=+y;});
+    });
+  }
+  if(data.nenkyuFY!==undefined&&data.nenkyuFY!==null) nenkyuFY=+data.nenkyuFY;
   if(data.staffLinks) staffLinks=data.staffLinks;
   // year・month はFirebaseから受け取らない（各端末が独自に表示月を管理）
   if(data.staffData){
@@ -1011,23 +1035,26 @@ function saveStaffScoped(name, schedEntries){
   if(typeof window._fbUpdatePaths!=='function') return;
   const paths={};
   paths['staffData/'+name]=serializeStaffData({[name]:staffData[name]||{}})[name]||{};
-  (schedEntries||[]).forEach(([m,nm])=>{
-    if(schedData[m]&&schedData[m][nm]){
-      paths['schedData/'+m+'/'+nm]=serializeSchedData({[m]:{[nm]:schedData[m][nm]}})[m][nm];
-    }
-  });
+  addSchedPaths(paths,schedEntries);
   window._fbUpdatePaths(paths);
 }
 // schedDataのみを(月,スタッフ)単位で部分保存する（管理者の勤務割当編集用）
 function saveSchedScoped(entries){
   if(typeof window._fbUpdatePaths!=='function') return;
   const paths={};
-  (entries||[]).forEach(([m,nm])=>{
-    if(schedData[m]&&schedData[m][nm]){
-      paths['schedData/'+m+'/'+nm]=serializeSchedData({[m]:{[nm]:schedData[m][nm]}})[m][nm];
-    }
-  });
+  addSchedPaths(paths,entries);
   window._fbUpdatePaths(paths);
+}
+// 勤務データ(月,スタッフ)の保存パスを追加する。あわせて「何年分のデータか」の印も更新する
+// （表示中の年・月を基準にする。表示月より前の月は翌年扱い＝12月の当直で翌1月に明けを入れる場合）
+function addSchedPaths(paths,entries){
+  (entries||[]).forEach(([m,nm])=>{
+    if(!(schedData[m]&&schedData[m][nm])) return;
+    paths['schedData/'+m+'/'+nm]=serializeSchedData({[m]:{[nm]:schedData[m][nm]}})[m][nm];
+    if(!schedYear[m])schedYear[m]={};
+    schedYear[m][nm]=m<month?year+1:year;
+    paths['schedYear/'+m+'/'+nm]=schedYear[m][nm];
+  });
 }
 // 全項目を丸ごと保存する（スタッフ追加・削除、有給年次更新、バックアップ復元など、
 // 複数月・複数スタッフのstaffData/schedDataを一括で書き換える操作専用。
@@ -1043,6 +1070,8 @@ function saveAllFull(){
     tochoDays: serializeTochoDays(),
     staffData: serializeStaffData(staffData),
     schedData: serializeSchedData(schedData),
+    schedYear: JSON.parse(JSON.stringify(schedYear)),
+    // nenkyuFYはここに含めない（古い端末の値で上書きしないよう、更新ボタンからのみ専用に保存する）
     nenkyuData: JSON.parse(JSON.stringify(nenkyuData)),
     staffLinks: JSON.parse(JSON.stringify(staffLinks))
   };
@@ -1055,14 +1084,14 @@ function loadAll(){
   return false;
 }
 function exportData(){
-  const blob=new Blob([JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),schedData,nenkyuData,staffLinks,year,month},null,2)],{type:'application/json'});
+  const blob=new Blob([JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),schedData,schedYear,nenkyuFY,nenkyuData,staffLinks,year,month},null,2)],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.json`;a.click();
 }
 function exportHtml(){
   // 現在のデータをシリアライズ
   const snapshot=JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
     tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),
-    schedData,nenkyuData,staffLinks,year,month});
+    schedData,schedYear,nenkyuFY,nenkyuData,staffLinks,year,month});
 
   // 注入するスナップショット復元スクリプト
   const marker='<!-- KINMUHYO_SNAPSHOT -->';
@@ -1474,8 +1503,14 @@ function calcNenkyu(name){
   const nd=nenkyuData[name]||{grant:0,carry:0,hourLimit:16};
   let consumed=0;
   let hourUsed=0; // 時間年休 使用時間合計
+  // 有給年度（10月〜翌9月）のデータだけを数える。schedDataは月ごとに1枠で年の情報を持たないため、
+  // 「何年分か」の印（schedYear）が今年度の暦年と違う月は、前年度のデータとして除外する。
+  // 印がない月（更新前の古いデータ・初期値のみの月）は従来どおり数える
+  const fy=getNenkyuFiscalYear();
   for(let mo=1;mo<=12;mo++){
     const sched=schedData[mo]?.[name];if(!sched)continue;
+    const tag=schedYear[mo]?.[name];
+    if(tag!==undefined&&tag!==calendarYearInFY(fy,mo))continue;
     sched.forEach(cell=>{
       const k=cellKey(cell);
       const sh=SHIFTS.find(s=>s.k===k);
@@ -2136,6 +2171,7 @@ function removeStaff(i){
   delete staffData[name];
   delete nenkyuData[name];
   Object.keys(schedData).forEach(m=>delete schedData[m][name]);
+  Object.keys(schedYear).forEach(m=>delete schedYear[m][name]);
   // 紐付けも削除
   Object.keys(staffLinks).forEach(uid=>{if(staffLinks[uid]===name)delete staffLinks[uid];});
   saveAllFull();rebuildStaffSelect();renderStaffMgr();
@@ -2339,6 +2375,10 @@ function renderTochoCal(){
 /* ── Nenkyu Panel ── */
 function renderNenkyuPanel(){
   const fy=getNenkyuFiscalYear();document.getElementById('nk-year-label').textContent=fy;
+  // 対象期間と、新年度に入ったのに更新が済んでいない場合の案内
+  const now=new Date(),todayFY=fiscalYearOf(now.getFullYear(),now.getMonth()+1);
+  document.getElementById('nk-fy-info').innerHTML=`対象期間：${fy}年10月〜${fy+1}年9月`
+    +(todayFY>fy?`<br><span style="color:#b45309;font-weight:500">⚠ ${todayFY}年度（${todayFY}年10月〜）に入りました。下の「有給を更新する」で新年度に切り替えてください。</span>`:'');
   const list=document.getElementById('nk-list');list.innerHTML='';
   // ヘッダー行
   const hdr=document.createElement('div');hdr.className='nk-row';
@@ -2364,21 +2404,105 @@ function renderNenkyuPanel(){
     list.appendChild(row);
   });
 }
-function updateNenkyu(){
-  if(!confirm('有給を更新します。現在の残日数（＋時間年休繰越分）が前年度繰越にセットされます。\n時間年休カウンターはリセットされます。'))return;
-  STAFF.forEach(name=>{
+// 画面内の確認・お知らせダイアログ（ブラウザ標準のconfirm/alertは、埋め込みブラウザなどで
+// 無効化されてボタンが無反応になることがあるため、有給の更新では使わない）。
+// withCancel=trueなら「実行／キャンセル」、falseなら「OK」のみ。実行/OKでtrue、キャンセルでfalseを返す
+function askDialog(message,withCancel){
+  return new Promise(resolve=>{
+    const ov=document.createElement('div');ov.className='pk-overlay on';ov.style.zIndex=300;
+    const box=document.createElement('div');box.className='pk-box';box.style.maxWidth='440px';
+    const msg=document.createElement('div');
+    msg.style.cssText='white-space:pre-wrap;font-size:12px;line-height:1.7;margin-bottom:12px;max-height:60vh;overflow-y:auto';
+    msg.textContent=message;
+    const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;justify-content:flex-end';
+    const done=v=>{ov.remove();resolve(v);};
+    if(withCancel){
+      const c=document.createElement('button');c.className='btn';c.textContent='キャンセル';c.onclick=()=>done(false);row.appendChild(c);
+    }
+    const ok=document.createElement('button');ok.className='btn primary';ok.textContent=withCancel?'実行':'OK';ok.onclick=()=>done(true);row.appendChild(ok);
+    box.append(msg,row);ov.appendChild(box);document.body.appendChild(ov);
+  });
+}
+// 有給の年度更新（10月に新しい有給が付与されたとき）
+// ・前年度の本年度付与の未使用分（上限NENKYU_CARRY_LIMIT日）が前年度繰越になる
+// ・古い前年度繰越の残りは繰り越さない／本年度付与は0に戻る（更新後に入力）
+// ・以降の有給計算は新年度（10月〜翌9月）の勤務だけを数える
+async function updateNenkyu(){
+  const today=new Date();
+  const newFY=fiscalYearOf(today.getFullYear(),today.getMonth()+1); // 今日が属する有給年度
+  const curFY=getNenkyuFiscalYear();
+  if(newFY<=curFY){
+    await askDialog(`有給はすでに${curFY}年度（${curFY}年10月〜${curFY+1}年9月）に更新済みです。\n次の更新は${curFY+1}年10月以降に行ってください。`,false);
+    return;
+  }
+  // 更新後の前年度繰越を、年度・データの印を変える前に計算する
+  const plan=STAFF.map(name=>{
     const nk=calcNenkyu(name);
-    if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0,hourLimit:16};
-    // 時間年休繰越分（8h単位切り捨て）を日単位有給繰越に加算
-    nenkyuData[name].carry=Math.max(0,nk.remain)+nk.hourCarryDays;
-    nenkyuData[name].grant=0;
-    // 時間年休使用分をschedDataからリセット（全月のhフィールドを0に）
-    Object.keys(schedData).forEach(m=>{
-      const sched=schedData[+m]?.[name];if(!sched)return;
-      schedData[+m][name]=sched.map(cell=>({k:cellKey(cell),h:0}));
+    const raw=nk.grantRem+nk.hourCarryDays; // 本年度付与の未使用分＋時間年休繰越分（8h単位切り捨て）
+    return {name,nk,raw,carry:Math.min(NENKYU_CARRY_LIMIT,raw)};
+  });
+  const lines=plan.map(p=>`・${p.name.split(' ')[0]}：${p.nk.carry}日 → ${p.carry}日`
+    +(p.raw>NENKYU_CARRY_LIMIT?`（上限${NENKYU_CARRY_LIMIT}日で切り捨て）`:'')
+    +(p.nk.carryRem>0?`（旧繰越の残り${p.nk.carryRem}日は消滅）`:''));
+  if(!await askDialog(`有給を${curFY}年度から${newFY}年度（${newFY}年10月〜${newFY+1}年9月）に更新します。\n\n`
+    +`・前年度の本年度付与の未使用分（上限${NENKYU_CARRY_LIMIT}日）が前年度繰越になります\n`
+    +`・古い前年度繰越の残りは繰り越されません\n`
+    +`・本年度付与は0に戻ります（更新後に入力してください）\n`
+    +`・${curFY}年度の勤務は新年度の集計に入りません（今月・来月に入力済みの分は新年度に数えます）\n\n`
+    +`【前年度繰越の更新】\n${lines.join('\n')}`,true))return;
+
+  plan.forEach(p=>{
+    if(!nenkyuData[p.name])nenkyuData[p.name]={grant:0,carry:0,hourLimit:16};
+    nenkyuData[p.name].carry=p.carry;
+    nenkyuData[p.name].grant=0;
+  });
+  const paths=markOldSchedYears(newFY,today);
+  nenkyuFY=newFY;
+  paths['nenkyuFY']=newFY;
+  saveAll(); // 前年度繰越・本年度付与（nenkyuData）を保存
+  if(typeof window._fbUpdatePaths==='function')window._fbUpdatePaths(paths); // 年度と勤務データの印を専用に保存
+  renderNenkyuPanel();
+  await askDialog(`${newFY}年度に更新しました。\n${newFY}年度の本年度付与日数を入力してください。`,false);
+}
+// 更新前の勤務データ（年の印がないもの）に「何年分か」の印を付け、保存用のパスを返す。
+// 新年度の10月から数えて「今月の次の月」までは新年度分、それより先の月は前年度の古いデータとして扱う
+function markOldSchedYears(newFY,today){
+  const paths={};
+  const startIdx=newFY*12+10;
+  const todayIdx=today.getFullYear()*12+today.getMonth()+1-startIdx;
+  STAFF.forEach(name=>{
+    Object.keys(schedData).forEach(key=>{
+      const mm=+key;
+      if(!schedData[mm]?.[name]||schedYear[mm]?.[name]!==undefined)return;
+      const yNew=calendarYearInFY(newFY,mm);
+      const yr=(yNew*12+mm-startIdx)<=todayIdx+1?yNew:yNew-1;
+      if(!schedYear[mm])schedYear[mm]={};
+      schedYear[mm][name]=yr;
+      paths['schedYear/'+mm+'/'+name]=yr;
     });
   });
-  saveAllFull();renderNenkyuPanel();alert('繰越を更新しました。本年度付与日数を入力してください。');
+  return paths;
+}
+// すでに「有給を更新する」を押して新年度の有給を入力済みの場合に、年度の扱いだけを新年度へ切り替える
+// （前年度繰越・本年度付与の数字は一切変えない）
+async function switchNenkyuYearOnly(){
+  const today=new Date();
+  const newFY=fiscalYearOf(today.getFullYear(),today.getMonth()+1);
+  const curFY=getNenkyuFiscalYear();
+  if(newFY<=curFY){
+    await askDialog(`有給はすでに${curFY}年度（${curFY}年10月〜${curFY+1}年9月）として扱っています。`,false);
+    return;
+  }
+  if(!await askDialog(`有給の年度を${newFY}年度（${newFY}年10月〜${newFY+1}年9月）に切り替えます。\n\n`
+    +`・前年度繰越・本年度付与の数字は変わりません\n`
+    +`・${curFY}年度の勤務は、有給の消化日数・時間年休の集計に入らなくなります（今月・来月に入力済みの分は新年度に数えます）\n\n`
+    +`すでに「有給を更新する」を押して新年度の有給を入力済みの場合に使います。まだの場合は「有給を更新する」を押してください。`,true))return;
+  const paths=markOldSchedYears(newFY,today);
+  nenkyuFY=newFY;
+  paths['nenkyuFY']=newFY;
+  if(typeof window._fbUpdatePaths==='function')window._fbUpdatePaths(paths);
+  renderNenkyuPanel();
+  await askDialog(`${newFY}年度に切り替えました。`,false);
 }
 
 /* ══ INIT ══ */
