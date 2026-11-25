@@ -60,6 +60,7 @@
 
   let _saveTimer = null;
   let _latestPayload = null;
+  let _skippedData = null; // 保存待ち中に届いた他端末の最新通知（待ち終了後に反映する）
   window._isSaving = false;
   window._lastSavedJson = null;
 
@@ -77,7 +78,11 @@
         // payloadに含まれないキー（staffData/schedData/confirmedMonthsは専用の
         // 粒度で個別保存されるためここには含まれない）はそのまま保持される。
         await update(ref(db, 'kinmuhyo/shared'), _latestPayload);
-        setTimeout(()=>{ window._isSaving = false; window._lastSavedJson = null; }, 8000);
+        setTimeout(()=>{
+          window._isSaving = false; window._lastSavedJson = null;
+          // 次の保存待ちがなければ、待っている間に届いた最新データを反映する
+          if(!_saveTimer && _skippedData){ const d=_skippedData; _skippedData=null; _applyRemote(d); }
+        }, 8000);
       } catch(e) {
         window._isSaving = false;
         window._lastSavedJson = null;
@@ -129,9 +134,13 @@
         window._lastSavedJson = null;
         return;
       }
-      if(window._isSaving) return; // デバウンス中の古い折り返しもスキップ
-
-      // 他端末からの更新 → 再描画
+      if(window._isSaving){ _skippedData = data; return; } // 捨てずに覚えておく
+      _skippedData = null;
+      _applyRemote(data);
+    });
+  };
+  // 他端末からの更新 → 再描画
+  function _applyRemote(data){
       try {
         if(typeof window.restoreFromData === 'function') window.restoreFromData(data);
         if(typeof rebuildStaffSelect === 'function'){
@@ -154,8 +163,7 @@
           if(settingsOpen && typeof _currentSetPanel!=='undefined' && _currentSetPanel==='shifts' && typeof renderShiftList==='function') renderShiftList();
         }
       } catch(e) { console.error('データ反映エラー:', e); }
-    });
-  };
+  }
 
   // 即時保存（beforeunload用）
   window._fbSaveImmediate = async (payload) => {
@@ -1001,6 +1009,7 @@ function restoreFromData(data){
 }
 window.restoreFromData = restoreFromData;
 
+const escHtml=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 /* ══ SAVE / LOAD (Firebase) ══ */
 function saveAll(){
   window._isSaving = true;
@@ -1091,7 +1100,7 @@ function exportHtml(){
   // 現在のデータをシリアライズ
   const snapshot=JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
     tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),
-    schedData,schedYear,nenkyuFY,nenkyuData,staffLinks,year,month});
+    schedData,schedYear,nenkyuFY,nenkyuData,staffLinks,year,month}).replace(/</g,'\\u003c'); // 「<」を変換して、書き出しファイルのscript終了タグ誤認を防ぐ
 
   // 注入するスナップショット復元スクリプト
   const marker='<!-- KINMUHYO_SNAPSHOT -->';
@@ -1475,7 +1484,7 @@ function renderSummary(){
         ${v.wish?`<span class="sum-type" style="background:var(--s-wish);color:var(--f-wish)">希望休</span>`:''}
         ${v.kibou?`<span class="sum-type" style="background:var(--s-kibou);color:var(--f-kibou)">★ ${shiftByKey(v.kibou).l}</span>`:''}
         ${v.limit?`<span class="sum-type" style="background:var(--s-limit);color:var(--f-limit)">条件${ngText?': '+ngText:''}</span>`:''}
-        ${v.comment?`<div class="sum-comment">${v.comment}</div>`:''}
+        ${v.comment?`<div class="sum-comment">${escHtml(v.comment)}</div>`:''}
       </div>
       <span class="sum-del" onclick="deleteEntry(${d})">×</span>`;
     list.appendChild(item);
@@ -2039,7 +2048,7 @@ function openPicker(name,d,td,e){
   let html=`<strong>${name.split(' ')[0]}　${month}/${d}（${dow}）</strong>`;
   if(dd.wish)html+=`<br><span style="color:var(--f-wish)">● 希望休あり</span>`;
   if(dd.kibou)html+=`<br><span style="color:var(--f-kibou)">★ 希望勤務: ${shiftByKey(dd.kibou).l}</span>`;
-  if(dd.limit){const ngN=[...ngSet].map(k=>shiftByKey(k).l).join('・');if(ngN)html+=`<div class="pk-conflict">▲ ${ngN}は不可</div>`;if(dd.comment)html+=`<div class="pk-comment">${dd.comment}</div>`;}
+  if(dd.limit){const ngN=[...ngSet].map(k=>shiftByKey(k).l).join('・');if(ngN)html+=`<div class="pk-conflict">▲ ${ngN}は不可</div>`;if(dd.comment)html+=`<div class="pk-comment">${escHtml(dd.comment)}</div>`;}
   if(dd.wish||dd.kibou||dd.limit){info.innerHTML=html;info.classList.add('on');}else info.classList.remove('on');
   const shiftsEl=document.getElementById('pk-shifts');shiftsEl.innerHTML='';
   SHIFTS.filter(s=>s.visible).forEach(s=>{
@@ -2162,7 +2171,7 @@ function addStaff(){
   if(STAFF.includes(name)){alert('同じ名前のスタッフがすでにいます');return;}
   STAFF.push(name);if(!staffData[name])staffData[name]={};if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0};
   Object.keys(schedData).forEach(m=>{if(!schedData[m][name]){const days=daysInMonth(year,+m);schedData[m][name]=[];for(let d=1;d<=days;d++)schedData[m][name].push({k:(isSat(year,+m,d)||isSun(year,+m,d))?'shukyu':'nikkn',h:0});}});
-  inp.value='';saveAllFull();rebuildStaffSelect();renderStaffMgr();
+  inp.value='';saveAll();saveSchedScoped(Object.keys(schedData).map(m=>[+m,name]));rebuildStaffSelect();renderStaffMgr();
 }
 function removeStaff(i){
   const name=STAFF[i];
@@ -2174,7 +2183,12 @@ function removeStaff(i){
   Object.keys(schedYear).forEach(m=>delete schedYear[m][name]);
   // 紐付けも削除
   Object.keys(staffLinks).forEach(uid=>{if(staffLinks[uid]===name)delete staffLinks[uid];});
-  saveAllFull();rebuildStaffSelect();renderStaffMgr();
+  saveAll();
+  // 消した人の分だけ消す（全体の上書きはしない）
+  const rmPaths={['staffData/'+name]:null};
+  Object.keys(schedData).forEach(m=>{rmPaths['schedData/'+m+'/'+name]=null;rmPaths['schedYear/'+m+'/'+name]=null;});
+  window._fbUpdatePaths(rmPaths);
+  rebuildStaffSelect();renderStaffMgr();
 }
 
 /* ── Shift Customizer ── */
