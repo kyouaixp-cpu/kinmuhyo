@@ -9,7 +9,7 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-  import { getDatabase, ref, set, update, onValue }
+  import { getDatabase, ref, set, update, onValue, get }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
   const firebaseConfig = {
@@ -114,7 +114,7 @@
   let _fbUnsubscribe = null; // onValue の解除関数
   window._fbStartSync = () => {
     if(_fbUnsubscribe) return; // すでにリスナー登録済み
-    _fbUnsubscribe = onValue(ref(db, 'kinmuhyo/shared'), (snapshot) => {
+    _fbUnsubscribe = onValue(ref(db, 'kinmuhyo/shared'), async (snapshot) => {
       const data = snapshot.val();
 
       // 初回ロード：Firebaseの最新データで初期化（データなし=空の状態で起動）
@@ -122,7 +122,8 @@
         window._appInitialized = true;
         STAFF.forEach(n=>{staffData[n]={};nenkyuData[n]={grant:0,carry:0,hourLimit:16};});
         if(data && typeof window.restoreFromData === 'function') window.restoreFromData(data);
-        ensureSchedule(month);
+        if(data && !data.ymMigrated) await _migrateYM();
+        ensureSchedule(curYM());
         initAll();
         return;
       }
@@ -147,8 +148,8 @@
           const lt = document.getElementById('logo-text');
           if(lt) lt.innerHTML = cfg.title+'<span id="logo-sub"> 勤務表</span>';
           STAFF.forEach(n => { if(!staffData[n])staffData[n]={}; if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0,hourLimit:16}; });
-          if(!tochoDays[month]) tochoDays[month] = new Set();
-          ensureSchedule(month);
+          if(!tochoDays[curYM()]) tochoDays[curYM()] = new Set();
+          ensureSchedule(curYM());
           rebuildStaffSelect();
           if(typeof updateLinkBtn==='function') updateLinkBtn();
           renderStaffCal(); renderSummary(); renderYkCard(); renderICS();
@@ -157,12 +158,29 @@
           const cw=document.getElementById('cfg-wish-limit'); if(cw) cw.value=cfg.wishLimit||6;
           const cd=document.getElementById('cfg-wish-day-limit'); if(cd) cd.value=cfg.wishDayLimit||2;
           const adminActive = document.getElementById('scr-admin')?.classList.contains('on');
-          if(adminActive){ ensureSchedule(month); renderAdmin(); }
+          if(adminActive){ ensureSchedule(curYM()); renderAdmin(); }
           // 設定タブ「勤務種別」が開いていれば再描画（GROUPSオブジェクト参照を最新化）
           const settingsOpen = document.getElementById('scr-settings')?.classList.contains('on');
           if(settingsOpen && typeof _currentSetPanel!=='undefined' && _currentSetPanel==='shifts' && typeof renderShiftList==='function') renderShiftList();
         }
       } catch(e) { console.error('データ反映エラー:', e); }
+  }
+
+  // 月だけの鍵（1〜12）から年月キー（202704など）への1回だけの移行。
+  // 古い場所（schedData/staffData/tochoDays/confirmedMonths）は元に戻せるよう消さずに残す
+  async function _migrateYM(){
+    const old = (await get(ref(db, 'kinmuhyo/confirmedMonths'))).val() || {};
+    const conf = {};
+    Object.keys(old).forEach(m => { if(old[m]) conf[legacyYM(+m)] = true; });
+    if(nenkyuFY === undefined) nenkyuFY = 2026; // 2026年10月に旧方式で更新済み（2026-11-26 ユーザー確認）
+    await update(ref(db, 'kinmuhyo'), {
+      'shared/schedYM': serializeSchedData(schedData),
+      'shared/staffYM': serializeStaffData(staffData),
+      'shared/tochoYM': serializeTochoDays(),
+      'shared/nenkyuFY': nenkyuFY,
+      'shared/ymMigrated': true,
+      'confirmedYM': Object.keys(conf).length ? conf : null,
+    });
   }
 
   // 即時保存（beforeunload用）
@@ -187,7 +205,7 @@
   window._fbSetConfirmedMonth = async (m, value) => {
     if(!auth.currentUser) return;
     try {
-      await set(ref(db, 'kinmuhyo/confirmedMonths/'+m), value?true:null);
+      await set(ref(db, 'kinmuhyo/confirmedYM/'+m), value?true:null);
     } catch(e) {
       console.error('確定状態の保存エラー:', e);
       alert('確定状態の保存に失敗しました。通信状況を確認してください。');
@@ -197,7 +215,7 @@
   let _fbConfirmedUnsubscribe = null;
   window._fbStartConfirmedSync = () => {
     if(_fbConfirmedUnsubscribe) return;
-    _fbConfirmedUnsubscribe = onValue(ref(db, 'kinmuhyo/confirmedMonths'), (snapshot) => {
+    _fbConfirmedUnsubscribe = onValue(ref(db, 'kinmuhyo/confirmedYM'), (snapshot) => {
       const data = snapshot.val() || {};
       confirmedMonths = {};
       Object.entries(data).forEach(([m,v]) => { if(v) confirmedMonths[+m] = true; });
@@ -815,12 +833,11 @@ let GROUPS=[
 let shukyuKijun={};  // { year: { month: days } } 年→月の2次元構造
 // 初期値（現在の年をデフォルトで生成するのはinitAll時）
 let tochoDays={};
-let confirmedMonths={}; // { month: true } 勤務表が確定済みの月
-// staffData[name][month][day] = {wish, limit, ng:Set, comment, kibou:shiftKey}
+// 月のデータの鍵はすべて年月キー（年×100＋月。例：2027年4月 → 202704）
+let confirmedMonths={}; // { 年月キー: true } 勤務表が確定済みの月
+// staffData[name][年月キー][day] = {wish, limit, ng:Set, comment, kibou:shiftKey}
 let staffData={};
-let schedData={};
-// schedYear[月][氏名] = その勤務データが何年分か（有給の年度集計用。schedDataは月ごとに1枠しかなく年の情報がないため）
-let schedYear={};
+let schedData={}; // schedData[年月キー][name] = [{k,h}, ...]
 // nenkyuFY = 現在の前年度繰越・本年度付与が対象としている有給年度（10月始まり。更新ボタンでのみ進める）
 let nenkyuFY;
 let nenkyuData={};
@@ -834,6 +851,13 @@ let selectedDay=null;
 let kibouSelected=null; // selected shift key for kibou mode
 
 /* ══ HELPERS ══ */
+const ymOf=(y,m)=>y*100+m;
+const ymYear=ym=>Math.floor(ym/100);
+const ymMonth=ym=>ym%100;
+const ymAdd=(ym,n)=>{const d=new Date(ymYear(ym),ymMonth(ym)-1+n,1);return ymOf(d.getFullYear(),d.getMonth()+1);};
+const curYM=()=>ymOf(year,month);
+// shortcut: 月だけの鍵（旧形式）の年は「4〜12月→2026年、1〜3月→2027年」で決め打ち（使い始め2026年4月・2026-11-26 ユーザー確認）。2027年4月以降に古い形式のバックアップを読み込む必要が出たら見直す
+const legacyYM=m=>(m>=4?2026:2027)*100+m;
 const daysInMonth=(y,m)=>new Date(y,m,0).getDate();
 const firstDow=(y,m)=>new Date(y,m-1,1).getDay(); // 0=Sun (Sunday-first)
 const getDow=(y,m,d)=>new Date(y,m-1,d).getDay();
@@ -851,20 +875,21 @@ function ensureDay(name,m,d){
   if(!staffData[name][m])staffData[name][m]={};
   if(!staffData[name][m][d])staffData[name][m][d]={wish:false,limit:false,ng:new Set(),comment:'',kibou:null};
 }
-function ensureSchedule(m){
-  if(!schedData[m])schedData[m]={};
-  const days=daysInMonth(year,m);
+function ensureSchedule(k){
+  const y=ymYear(k),m=ymMonth(k);
+  if(!schedData[k])schedData[k]={};
+  const days=daysInMonth(y,m);
   STAFF.forEach(name=>{
-    if(!schedData[m][name]){
-      schedData[m][name]=[];
+    if(!schedData[k][name]){
+      schedData[k][name]=[];
       for(let d=1;d<=days;d++)
-        schedData[m][name].push({k:(isSat(year,m,d)||isSun(year,m,d)||isHol(year,m,d))?'shukyu':'nikkn',h:0});
+        schedData[k][name].push({k:(isSat(y,m,d)||isSun(y,m,d)||isHol(y,m,d))?'shukyu':'nikkn',h:0});
     } else {
       // 旧形式（文字列）を {k,h} に変換
-      schedData[m][name]=schedData[m][name].map(cell=>typeof cell==='string'?{k:cell,h:0}:(cell&&cell.k?cell:{k:'empty',h:0}));
+      schedData[k][name]=schedData[k][name].map(cell=>typeof cell==='string'?{k:cell,h:0}:(cell&&cell.k?cell:{k:'empty',h:0}));
     }
-    while(schedData[m][name].length<days)schedData[m][name].push({k:'nikkn',h:0});
-    if(schedData[m][name].length>days)schedData[m][name].length=days;
+    while(schedData[k][name].length<days)schedData[k][name].push({k:'nikkn',h:0});
+    if(schedData[k][name].length>days)schedData[k][name].length=days;
   });
 }
 /* ── 有給の年度（10月〜翌9月） ── */
@@ -877,8 +902,6 @@ const getNenkyuFiscalYear=()=>{
   const t=new Date(),m=t.getMonth()+1;
   return fiscalYearOf(t.getFullYear(),m)-(m>=10?1:0);
 };
-// 有給年度fyにおいて、month月のデータが属する暦年（10〜12月はfy年、1〜9月はfy+1年）
-const calendarYearInFY=(fy,m)=>m>=10?fy:fy+1;
 
 /* ══ SERIALIZE ══ */
 function serializeStaffData(sd){
@@ -960,9 +983,14 @@ function restoreFromData(data){
       });
     }
   }
-  if(data.tochoDays){
+  // 移行済みなら年月キーの場所を、未移行（古いバックアップ等）なら月だけの鍵を年月キーに直して読む
+  // Firebaseは数字の鍵を配列で返すことがあり、空き（null）が混ざるので除く
+  const clean=o=>o&&Object.fromEntries(Object.entries(o).filter(([,v])=>v!=null));
+  const src=(newKey,oldKey)=>data.ymMigrated?[clean(data[newKey]),k=>+k]:[clean(data[oldKey]),k=>legacyYM(+k)];
+  const [tSrc,tKey]=src('tochoYM','tochoDays');
+  if(tSrc){
     tochoDays={};
-    Object.entries(data.tochoDays).forEach(([m,a])=>{tochoDays[+m]=new Set(a);});
+    Object.entries(tSrc).forEach(([m,a])=>{tochoDays[tKey(m)]=new Set(a);});
   }
   // confirmedMonthsは専用パス（kinmuhyo/confirmedMonths）で管理するため、
   // この共有データブロックからは復元しない（_fbStartConfirmedSyncが担当）
@@ -973,35 +1001,32 @@ function restoreFromData(data){
       if(nenkyuData[name].hourLimit===undefined) nenkyuData[name].hourLimit=16;
     });
   }
-  if(data.schedData){
+  const [scSrc,scKey]=src('schedYM','schedData');
+  if(scSrc){
     schedData={};
-    Object.entries(data.schedData).forEach(([m,mv])=>{
-      schedData[+m]={};
+    Object.entries(scSrc).forEach(([m,mv])=>{
+      const k=scKey(m);
+      schedData[k]={};
       if(mv) Object.entries(mv).forEach(([name,arr])=>{
-        schedData[+m][name]=Array.isArray(arr)
+        schedData[k][name]=Array.isArray(arr)
           ? arr.map(cell=>typeof cell==='string'?{k:cell,h:0}:(cell&&cell.k?cell:{k:'empty',h:0}))
           : [];
       });
     });
   }
-  if(data.schedYear){
-    schedYear={};
-    Object.entries(data.schedYear).forEach(([m,mv])=>{
-      schedYear[+m]={};
-      if(mv) Object.entries(mv).forEach(([name,y])=>{schedYear[+m][name]=+y;});
-    });
-  }
   if(data.nenkyuFY!==undefined&&data.nenkyuFY!==null) nenkyuFY=+data.nenkyuFY;
   if(data.staffLinks) staffLinks=data.staffLinks;
   // year・month はFirebaseから受け取らない（各端末が独自に表示月を管理）
-  if(data.staffData){
+  const [stSrc,stKey]=src('staffYM','staffData');
+  if(stSrc){
     staffData={};
-    Object.entries(data.staffData).forEach(([n,mv])=>{
+    Object.entries(stSrc).forEach(([n,mv])=>{
       staffData[n]={};
-      if(mv) Object.entries(mv).forEach(([mo,dv])=>{
-        staffData[n][+mo]={};
+      if(mv) Object.entries(clean(mv)).forEach(([mo,dv])=>{
+        const k=stKey(mo);
+        staffData[n][k]={};
         if(dv) Object.entries(dv).forEach(([d,v])=>{
-          staffData[n][+mo][+d]={...v,ng:new Set(v.ng||[])};
+          staffData[n][k][+d]={...v,ng:new Set(v.ng||[])};
         });
       });
     });
@@ -1020,7 +1045,7 @@ function saveAll(){
     SHIFTS: JSON.parse(JSON.stringify(SHIFTS)),
     GROUPS: JSON.parse(JSON.stringify(GROUPS)),
     shukyuKijun: JSON.parse(JSON.stringify(shukyuKijun)),
-    tochoDays: serializeTochoDays(),
+    tochoYM: serializeTochoDays(),
     // confirmedMonths・staffData・schedDataはここに含めない。
     // 複数人が同時に別々のスタッフ・日付を編集した際、丸ごと上書きで
     // お互いの変更を消してしまう競合を防ぐため、専用の粒度で個別保存する
@@ -1043,7 +1068,7 @@ function saveAll(){
 function saveStaffScoped(name, schedEntries){
   if(typeof window._fbUpdatePaths!=='function') return;
   const paths={};
-  paths['staffData/'+name]=serializeStaffData({[name]:staffData[name]||{}})[name]||{};
+  paths['staffYM/'+name]=serializeStaffData({[name]:staffData[name]||{}})[name]||{};
   addSchedPaths(paths,schedEntries);
   window._fbUpdatePaths(paths);
 }
@@ -1054,15 +1079,11 @@ function saveSchedScoped(entries){
   addSchedPaths(paths,entries);
   window._fbUpdatePaths(paths);
 }
-// 勤務データ(月,スタッフ)の保存パスを追加する。あわせて「何年分のデータか」の印も更新する
-// （表示中の年・月を基準にする。表示月より前の月は翌年扱い＝12月の当直で翌1月に明けを入れる場合）
+// 勤務データ(年月キー,スタッフ)の保存パスを追加する
 function addSchedPaths(paths,entries){
   (entries||[]).forEach(([m,nm])=>{
     if(!(schedData[m]&&schedData[m][nm])) return;
-    paths['schedData/'+m+'/'+nm]=serializeSchedData({[m]:{[nm]:schedData[m][nm]}})[m][nm];
-    if(!schedYear[m])schedYear[m]={};
-    schedYear[m][nm]=m<month?year+1:year;
-    paths['schedYear/'+m+'/'+nm]=schedYear[m][nm];
+    paths['schedYM/'+m+'/'+nm]=serializeSchedData({[m]:{[nm]:schedData[m][nm]}})[m][nm];
   });
 }
 // 全項目を丸ごと保存する（スタッフ追加・削除、有給年次更新、バックアップ復元など、
@@ -1076,10 +1097,10 @@ function saveAllFull(){
     SHIFTS: JSON.parse(JSON.stringify(SHIFTS)),
     GROUPS: JSON.parse(JSON.stringify(GROUPS)),
     shukyuKijun: JSON.parse(JSON.stringify(shukyuKijun)),
-    tochoDays: serializeTochoDays(),
-    staffData: serializeStaffData(staffData),
-    schedData: serializeSchedData(schedData),
-    schedYear: JSON.parse(JSON.stringify(schedYear)),
+    tochoYM: serializeTochoDays(),
+    staffYM: serializeStaffData(staffData),
+    schedYM: serializeSchedData(schedData),
+    ymMigrated: true,
     // nenkyuFYはここに含めない（古い端末の値で上書きしないよう、更新ボタンからのみ専用に保存する）
     nenkyuData: JSON.parse(JSON.stringify(nenkyuData)),
     staffLinks: JSON.parse(JSON.stringify(staffLinks))
@@ -1092,15 +1113,16 @@ function loadAll(){
   // データがFirebaseにあれば_fbStartSync内で上書きされる
   return false;
 }
+// 書き出し用のデータ（年月キーの形式。restoreFromDataでそのまま読める）
+const snapshotData=()=>({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,ymMigrated:true,tochoYM:serializeTochoDays(),
+  staffYM:serializeStaffData(staffData),schedYM:serializeSchedData(schedData),nenkyuFY,nenkyuData,staffLinks,year,month});
 function exportData(){
-  const blob=new Blob([JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),schedData,schedYear,nenkyuFY,nenkyuData,staffLinks,year,month},null,2)],{type:'application/json'});
+  const blob=new Blob([JSON.stringify(snapshotData(),null,2)],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`kinmuhyo_${year}_${String(month).padStart(2,'0')}.json`;a.click();
 }
 function exportHtml(){
   // 現在のデータをシリアライズ
-  const snapshot=JSON.stringify({cfg,STAFF,SHIFTS,GROUPS,shukyuKijun,
-    tochoDays:serializeTochoDays(),staffData:serializeStaffData(staffData),
-    schedData,schedYear,nenkyuFY,nenkyuData,staffLinks,year,month}).replace(/</g,'\\u003c'); // 「<」を変換して、書き出しファイルのscript終了タグ誤認を防ぐ
+  const snapshot=JSON.stringify(snapshotData()).replace(/</g,'\\u003c'); // 「<」を変換して、書き出しファイルのscript終了タグ誤認を防ぐ
 
   // 注入するスナップショット復元スクリプト
   const marker='<!-- KINMUHYO_SNAPSHOT -->';
@@ -1109,21 +1131,7 @@ function exportHtml(){
   try{
     const _snap=${snapshot};
     window._snapLoaded=true;
-    if(typeof restoreFromData==='function'){
-      restoreFromData(_snap);
-    } else {
-      // フォールバック（restoreFromDataが未定義の場合）
-      if(_snap.cfg)cfg=_snap.cfg;
-      if(_snap.STAFF)STAFF=_snap.STAFF;
-      if(_snap.SHIFTS)SHIFTS=_snap.SHIFTS;
-      if(_snap.GROUPS)GROUPS=_snap.GROUPS;
-      if(_snap.shukyuKijun){shukyuKijun={};Object.entries(_snap.shukyuKijun).forEach(([m,v])=>{shukyuKijun[+m]=v;});}
-      if(_snap.tochoDays){tochoDays={};Object.entries(_snap.tochoDays).forEach(([m,a])=>{tochoDays[+m]=new Set(a);});}
-      if(_snap.nenkyuData)nenkyuData=_snap.nenkyuData;
-      if(_snap.staffLinks)staffLinks=_snap.staffLinks;
-      if(_snap.schedData){schedData={};Object.entries(_snap.schedData).forEach(([m,mv])=>{schedData[+m]={};if(mv)Object.entries(mv).forEach(([n,a])=>{schedData[+m][n]=Array.isArray(a)?a.map(c=>typeof c==='string'?{k:c,h:0}:(c&&c.k?c:{k:'empty',h:0})):[];});});}
-      if(_snap.staffData){staffData={};Object.entries(_snap.staffData).forEach(([n,mv])=>{staffData[n]={};if(mv)Object.entries(mv).forEach(([mo,dv])=>{staffData[n][+mo]={};if(dv)Object.entries(dv).forEach(([d,v])=>{staffData[n][+mo][+d]={...v,ng:new Set(v.ng||[])};});});});}
-    }
+    restoreFromData(_snap);
     if(typeof initAll==='function')initAll();
   }catch(e){console.error('スナップショット復元エラー:',e);}
 })();
@@ -1185,7 +1193,7 @@ function showScreen(s){
   if(s==='staff')tabs[0].classList.add('on');
   if(s==='admin')tabs[1].classList.add('on');
   if(s==='settings')tabs[2].classList.add('on');
-  if(s==='admin'){ensureSchedule(month);renderAdmin();}
+  if(s==='admin'){ensureSchedule(curYM());renderAdmin();}
   if(s==='settings')renderSettings();
   if(s==='staff'){renderStaffCal();renderSummary();renderYkCard();renderICS();}
 }
@@ -1196,7 +1204,7 @@ function changeMonth(dir){
   document.getElementById('month-label').textContent=`${year}年 ${month}月`;
   // ensureSchedule()はローカルの表示用デフォルト補完のみ。各クライアントが
   // 同じ規則で同じ値を導出できるため、月移動のたびにFirebaseへ再送する必要はない
-  selectedDay=null;kibouSelected=null;hideDetail();ensureSchedule(month);
+  selectedDay=null;kibouSelected=null;hideDetail();ensureSchedule(curYM());
   const active=document.querySelector('.scr.on').id;
   if(active==='scr-staff'){renderStaffCal();renderSummary();renderYkCard();renderICS();}
   if(active==='scr-admin')renderAdmin();
@@ -1268,7 +1276,7 @@ function setMode(m){
 
 /* ══ STAFF CALENDAR ══ */
 function renderStaffCal(){
-  const isConfirmed=!!confirmedMonths[month];
+  const isConfirmed=!!confirmedMonths[curYM()];
   const leg=document.getElementById('stf-cal-legend');
   leg.innerHTML=`
     <span class="leg" style="background:var(--s-wish);color:var(--f-wish)">● 希望休</span>
@@ -1281,10 +1289,10 @@ function renderStaffCal(){
   const grid=document.getElementById('stf-cal');grid.innerHTML='';
   const fd=firstDow(year,month),days=daysInMonth(year,month);
   const hols=getHolidays(year,month);
-  if(isConfirmed)ensureSchedule(month);
+  if(isConfirmed)ensureSchedule(curYM());
   for(let i=0;i<fd;i++){const e=document.createElement('div');e.className='cal-cell empty';grid.appendChild(e);}
   for(let d=1;d<=days;d++){
-    const dd=staffData[currentStaff]?.[month]?.[d]||{};
+    const dd=staffData[currentStaff]?.[curYM()]?.[d]||{};
     const cell=document.createElement('div');
     let base=cellCls(year,month,d); // returns 'hol','sun','sat','normal'
     let cls='cal-cell '+base;
@@ -1294,14 +1302,14 @@ function renderStaffCal(){
     else if(hasKibou)cls+=' kibou';
     else if(hasLimit)cls+=' limit';
     if(d===selectedDay)cls+=' selected';
-    if(isTochoDay(month,d))cls+=' tocho-day';
+    if(isTochoDay(curYM(),d))cls+=' tocho-day';
     cell.className=cls;
     let txt=String(d);
     if(hasWish)txt+='<span class="dot">●</span>';
     if(hasKibou)txt+='<span class="dot" style="color:#166534">★'+(shiftByKey(dd.kibou).l)+'</span>';
     else if(hasLimit&&!hasWish&&!hasKibou)txt+='<span class="dot">▲</span>';
     if(isConfirmed){
-      const schedCell=schedData[month]?.[currentStaff]?.[d-1];
+      const schedCell=schedData[curYM()]?.[currentStaff]?.[d-1];
       if(schedCell){
         const sh=shiftByKey(cellKey(schedCell));
         const h=cellHour(schedCell);
@@ -1317,25 +1325,25 @@ function renderStaffCal(){
 function tapDay(d){
   if(!STAFF.length)return;
   ensureDay(currentStaff,month,d);
-  const dd=staffData[currentStaff][month][d];
+  const dd=staffData[currentStaff][curYM()][d];
 
   if(currentMode==='wish'){
     dd.wish=!dd.wish;
     // 希望休を管理者画面に即時反映
-    ensureSchedule(month);
-    const curH=cellHour(schedData[month][currentStaff][d-1]);
+    ensureSchedule(curYM());
+    const curH=cellHour(schedData[curYM()][currentStaff][d-1]);
     if(dd.wish){
-      schedData[month][currentStaff][d-1]={k:'shukyu',h:curH};
+      schedData[curYM()][currentStaff][d-1]={k:'shukyu',h:curH};
       // 警告チェック（平日のみ）
       checkWishWarnings(currentStaff,month);
     } else {
       // 解除時は日勤に戻す（土日祝は週休のまま）
       if(!isSat(year,month,d)&&!isSun(year,month,d)&&!isHol(year,month,d)){
-        schedData[month][currentStaff][d-1]={k:'nikkn',h:curH};
+        schedData[curYM()][currentStaff][d-1]={k:'nikkn',h:curH};
       }
     }
-    if(!dd.wish&&!dd.limit&&!dd.ng.size&&!dd.comment&&!dd.kibou)delete staffData[currentStaff][month][d];
-    saveStaffScoped(currentStaff,[[month,currentStaff]]);renderStaffCal();renderSummary();return;
+    if(!dd.wish&&!dd.limit&&!dd.ng.size&&!dd.comment&&!dd.kibou)delete staffData[currentStaff][curYM()][d];
+    saveStaffScoped(currentStaff,[[curYM(),currentStaff]]);renderStaffCal();renderSummary();return;
   }
 
   if(currentMode==='kibou'){
@@ -1348,7 +1356,7 @@ function tapDay(d){
 }
 
 function checkWishWarnings(name,m){
-  const mData=staffData[name]?.[m]||{};
+  const mData=staffData[name]?.[curYM()]||{};
   const wishDays=Object.entries(mData).filter(([,v])=>v.wish);
   const limit=cfg.wishLimit||6;
   const hols=getHolidays(year,m);
@@ -1357,7 +1365,7 @@ function checkWishWarnings(name,m){
     alert(`⚠ ${name} の希望休が月間上限（${limit}日）を超えています（現在${weekdayWish.length}日）`);
   }
   // 当直日との重複チェック
-  const tochoConflict=wishDays.filter(([d])=>isTochoDay(m,+d));
+  const tochoConflict=wishDays.filter(([d])=>isTochoDay(curYM(),+d));
   if(tochoConflict.length){
     alert(`⚠ ${tochoConflict.map(([d])=>d+'日').join('・')} は当直日と重なっています`);
   }
@@ -1365,7 +1373,7 @@ function checkWishWarnings(name,m){
   const dayLimit=cfg.wishDayLimit||2;
   wishDays.forEach(([d])=>{
     if(isSat(year,m,+d)||isSun(year,m,+d)||hols.has(+d))return;
-    const cnt=STAFF.filter(n=>{return staffData[n]?.[m]?.[+d]?.wish;}).length;
+    const cnt=STAFF.filter(n=>{return staffData[n]?.[curYM()]?.[+d]?.wish;}).length;
     if(cnt>dayLimit){
       alert(`⚠ ${m}月${d}日 の希望休が1日あたりの上限（${dayLimit}名）を超えています（現在${cnt}名）`);
     }
@@ -1426,31 +1434,31 @@ function hideDetail(){
 function saveCondition(){
   if(!selectedDay)return;
   ensureDay(currentStaff,month,selectedDay);
-  const dd=staffData[currentStaff][month][selectedDay];
+  const dd=staffData[currentStaff][curYM()][selectedDay];
   dd.comment=document.getElementById('comment-inp').value.trim();
   if(!dd.ng.size&&!dd.comment)dd.limit=false;
-  if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][month][selectedDay];
+  if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][curYM()][selectedDay];
   selectedDay=null;hideDetail();saveStaffScoped(currentStaff);renderStaffCal();renderSummary();
 }
 
 function saveKibou(){
   if(!selectedDay)return;
   ensureDay(currentStaff,month,selectedDay);
-  const dd=staffData[currentStaff][month][selectedDay];
+  const dd=staffData[currentStaff][curYM()][selectedDay];
   dd.kibou=kibouSelected;
   // 管理者カレンダーに直接反映
-  ensureSchedule(month);
+  ensureSchedule(curYM());
   let spilloverMonth=null;
   if(kibouSelected){
-    const curH=cellHour(schedData[month][currentStaff][selectedDay-1]);
-    schedData[month][currentStaff][selectedDay-1]={k:kibouSelected,h:curH};
+    const curH=cellHour(schedData[curYM()][currentStaff][selectedDay-1]);
+    schedData[curYM()][currentStaff][selectedDay-1]={k:kibouSelected,h:curH};
     // 当直 → 翌日を明けに自動セット（設定がONの場合）
     if(kibouSelected==='tocho'&&cfg.autoAke!==false){
       const totalDays=daysInMonth(year,month);
       if(selectedDay<totalDays){
-        schedData[month][currentStaff][selectedDay]={k:'ake',h:0};
+        schedData[curYM()][currentStaff][selectedDay]={k:'ake',h:0};
       } else {
-        const nm=month===12?1:month+1;
+        const nm=ymAdd(curYM(),1);
         ensureSchedule(nm);
         if(schedData[nm][currentStaff]){schedData[nm][currentStaff][0]={k:'ake',h:0};spilloverMonth=nm;}
       }
@@ -1458,20 +1466,20 @@ function saveKibou(){
   } else {
     // 解除時：希望休なら週休、土日祝なら週休、それ以外は日勤
     const d=selectedDay;
-    const curH=cellHour(schedData[month][currentStaff][d-1]);
-    if(dd.wish){schedData[month][currentStaff][d-1]={k:'shukyu',h:curH};}
-    else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){schedData[month][currentStaff][d-1]={k:'shukyu',h:curH};}
-    else{schedData[month][currentStaff][d-1]={k:'nikkn',h:curH};}
+    const curH=cellHour(schedData[curYM()][currentStaff][d-1]);
+    if(dd.wish){schedData[curYM()][currentStaff][d-1]={k:'shukyu',h:curH};}
+    else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){schedData[curYM()][currentStaff][d-1]={k:'shukyu',h:curH};}
+    else{schedData[curYM()][currentStaff][d-1]={k:'nikkn',h:curH};}
   }
-  if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][month][selectedDay];
-  const schedEntries=[[month,currentStaff]];
+  if(!dd.wish&&!dd.limit&&!dd.kibou)delete staffData[currentStaff][curYM()][selectedDay];
+  const schedEntries=[[curYM(),currentStaff]];
   if(spilloverMonth)schedEntries.push([spilloverMonth,currentStaff]);
   selectedDay=null;kibouSelected=null;hideDetail();saveStaffScoped(currentStaff,schedEntries);renderStaffCal();renderSummary();
 }
 
 function renderSummary(){
   const list=document.getElementById('sum-list');list.innerHTML='';
-  const mData=staffData[currentStaff]?.[month]||{};
+  const mData=staffData[currentStaff]?.[curYM()]||{};
   const entries=Object.entries(mData).filter(([,v])=>v.wish||v.limit||v.kibou).sort(([a],[b])=>+a-+b);
   if(!entries.length){list.innerHTML='<div class="side-empty">まだ登録がありません</div>';return;}
   entries.forEach(([d,v])=>{
@@ -1492,19 +1500,19 @@ function renderSummary(){
 }
 
 function deleteEntry(d){
-  const hadKibou=staffData[currentStaff]?.[month]?.[d]?.kibou;
-  if(staffData[currentStaff]?.[month])delete staffData[currentStaff][month][d];
+  const hadKibou=staffData[currentStaff]?.[curYM()]?.[d]?.kibou;
+  if(staffData[currentStaff]?.[curYM()])delete staffData[currentStaff][curYM()][d];
   // 希望休・希望勤務が削除されたら管理者画面も戻す
-  if(schedData[month]&&schedData[month][currentStaff]){
-    const curH=cellHour(schedData[month][currentStaff][d-1]);
+  if(schedData[curYM()]&&schedData[curYM()][currentStaff]){
+    const curH=cellHour(schedData[curYM()][currentStaff][d-1]);
     if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d)){
-      schedData[month][currentStaff][d-1]={k:'shukyu',h:curH};
+      schedData[curYM()][currentStaff][d-1]={k:'shukyu',h:curH};
     } else {
-      schedData[month][currentStaff][d-1]={k:'nikkn',h:curH};
+      schedData[curYM()][currentStaff][d-1]={k:'nikkn',h:curH};
     }
   }
   if(selectedDay===+d){selectedDay=null;kibouSelected=null;hideDetail();}
-  saveStaffScoped(currentStaff,[[month,currentStaff]]);renderStaffCal();renderSummary();
+  saveStaffScoped(currentStaff,[[curYM(),currentStaff]]);renderStaffCal();renderSummary();
 }
 
 /* ══ NENKYU CARD ══ */
@@ -1512,14 +1520,10 @@ function calcNenkyu(name){
   const nd=nenkyuData[name]||{grant:0,carry:0,hourLimit:16};
   let consumed=0;
   let hourUsed=0; // 時間年休 使用時間合計
-  // 有給年度（10月〜翌9月）のデータだけを数える。schedDataは月ごとに1枠で年の情報を持たないため、
-  // 「何年分か」の印（schedYear）が今年度の暦年と違う月は、前年度のデータとして除外する。
-  // 印がない月（更新前の古いデータ・初期値のみの月）は従来どおり数える
+  // 有給年度（fy年10月〜翌9月）の12か月分だけを数える
   const fy=getNenkyuFiscalYear();
-  for(let mo=1;mo<=12;mo++){
-    const sched=schedData[mo]?.[name];if(!sched)continue;
-    const tag=schedYear[mo]?.[name];
-    if(tag!==undefined&&tag!==calendarYearInFY(fy,mo))continue;
+  for(let i=0;i<12;i++){
+    const sched=schedData[ymAdd(ymOf(fy,10),i)]?.[name];if(!sched)continue;
     sched.forEach(cell=>{
       const k=cellKey(cell);
       const sh=SHIFTS.find(s=>s.k===k);
@@ -1592,8 +1596,9 @@ function renderICS(){
     :'iPhone / Google カレンダー 両対応';
   const el=document.getElementById('ics-months');el.innerHTML='';
   for(let m=1;m<=12;m++){
-    const chip=document.createElement('span');chip.className='ics-chip'+(icsSelMonths.has(m)?' on':'');
-    chip.textContent=m+'月';chip.onclick=()=>{if(icsSelMonths.has(m))icsSelMonths.delete(m);else icsSelMonths.add(m);renderICS();};
+    const k=ymOf(year,m); // 表示中の年の1〜12月
+    const chip=document.createElement('span');chip.className='ics-chip'+(icsSelMonths.has(k)?' on':'');
+    chip.textContent=m+'月';chip.onclick=()=>{if(icsSelMonths.has(k))icsSelMonths.delete(k);else icsSelMonths.add(k);renderICS();};
     el.appendChild(chip);
   }
   const sel=document.getElementById('ics-shifts');sel.innerHTML='';
@@ -1610,14 +1615,15 @@ function downloadICS(){
   // PRODIDは英数字のみ（日本語不可・//EN必須）
   let ics='BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//KinmuhyoApp//Schedule//EN\r\nCALSCALE:GREGORIAN\r\nMETHOD:PUBLISH\r\n';
   let eventCount=0;
-  [...icsSelMonths].sort((a,b)=>a-b).forEach(m=>{
-    const sched=schedData[m]?.[currentStaff];if(!sched)return;
-    const days=daysInMonth(year,m);
+  [...icsSelMonths].sort((a,b)=>a-b).forEach(k=>{
+    const y=ymYear(k),m=ymMonth(k);
+    const sched=schedData[k]?.[currentStaff];if(!sched)return;
+    const days=daysInMonth(y,m);
     for(let d=1;d<=days;d++){
       const k=cellKey(sched[d-1]);if(!icsSelShifts.has(k))continue;
       const sh=shiftByKey(k);
-      const dt=`${year}${String(m).padStart(2,'0')}${String(d).padStart(2,'0')}`;
-      const dtEnd=new Date(year,m-1,d+1);
+      const dt=`${y}${String(m).padStart(2,'0')}${String(d).padStart(2,'0')}`;
+      const dtEnd=new Date(y,m-1,d+1);
       const dtEndStr=`${dtEnd.getFullYear()}${String(dtEnd.getMonth()+1).padStart(2,'0')}${String(dtEnd.getDate()).padStart(2,'0')}`;
       // SUMMARYは半角スペース区切り、特殊文字をエスケープ
       const summary=`${sh.l}`.replace(/[\\;,]/g,'\\$&');
@@ -1652,12 +1658,12 @@ function downloadICS(){
 
 /* ══ ADMIN ══ */
 function renderAdmin(){
-  ensureSchedule(month);
+  ensureSchedule(curYM());
   const days=daysInMonth(year,month);
   const hols=getHolidays(year,month);
   const confirmBtn=document.getElementById('btn-confirm-month');
   if(confirmBtn){
-    const isConfirmed=!!confirmedMonths[month];
+    const isConfirmed=!!confirmedMonths[curYM()];
     confirmBtn.textContent=isConfirmed?'✓ 確定済み（解除）':'確定';
     confirmBtn.classList.toggle('confirmed',isConfirmed);
   }
@@ -1675,7 +1681,7 @@ function renderAdmin(){
   const tr=document.createElement('tr');
   const thN=document.createElement('th');thN.className='th-name';thN.textContent='氏名';tr.appendChild(thN);
   for(let d=1;d<=days;d++){
-    const isHolDay=hols.has(d);const isTD=isTochoDay(month,d);const th=document.createElement('th');
+    const isHolDay=hols.has(d);const isTD=isTochoDay(curYM(),d);const th=document.createElement('th');
     th.className='th-day'+(isSat(year,month,d)?' th-sat':isSun(year,month,d)?' th-sun':isHolDay?' th-hol':'')+(isTD?' th-tocho':'');
     th.innerHTML=`${d}<br><span style="font-size:9px">${DOW[getDow(year,month,d)]}</span>${isHolDay?'<br><span style="font-size:7px">祝</span>':''}${isTD?'<br><span style="font-size:7px">当</span>':''}`;
     tr.appendChild(th);
@@ -1693,10 +1699,10 @@ function renderAdmin(){
     const tdN=document.createElement('td');tdN.className='td-name';tdN.textContent=name.split(' ')[0];row.appendChild(tdN);
     const grpSums={};GROUPS.forEach(g=>{grpSums[g.name]=0;});
     for(let d=1;d<=days;d++){
-      const cell=(schedData[month][name]&&schedData[month][name][d-1])||{k:'empty',h:0};
+      const cell=(schedData[curYM()][name]&&schedData[curYM()][name][d-1])||{k:'empty',h:0};
       const k=cellKey(cell);const h=cellHour(cell);
       const sh=shiftByKey(k);
-      const dd=staffData[name]?.[month]?.[d]||{};
+      const dd=staffData[name]?.[curYM()]?.[d]||{};
       const isConflict=dd.ng&&dd.ng.has&&dd.ng.has(k);
       const td=document.createElement('td');td.className='cell';
       if(isConflict){td.classList.add('conflict');conflicts.push(`${name.split(' ')[0]} ${month}/${d}`);}
@@ -1753,8 +1759,8 @@ function renderAdmin(){
   const ftr=document.createElement('tr');
   const ftd=document.createElement('td');ftd.className='td-name';ftd.textContent='当直数';ftr.appendChild(ftd);
   for(let d=1;d<=days;d++){
-    const cnt=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='tocho').length;
-    const isTD=isTochoDay(month,d);const td=document.createElement('td');
+    const cnt=STAFF.filter(n=>schedData[curYM()][n]&&cellKey(schedData[curYM()][n][d-1])==='tocho').length;
+    const isTD=isTochoDay(curYM(),d);const td=document.createElement('td');
     td.style.cssText='font-weight:500;font-size:10px;text-align:center;padding:3px 2px';td.textContent=cnt;
     if(isTD){td.style.background=cnt>=2?'#dcfce7':'#fee2e2';td.style.color=cnt>=2?'#166534':'#991b1b';}
     else{td.style.background='#f0efe9';td.style.color='#a09e97';}
@@ -1766,8 +1772,8 @@ function renderAdmin(){
   const ftr2=document.createElement('tr');ftr2.className='taiki-row';
   const ftd2=document.createElement('td');ftd2.className='td-name';ftd2.style.cssText='font-size:10px;color:#166534;font-weight:500;padding:3px 6px;background:#f0fdf4';ftd2.textContent='待機者';ftr2.appendChild(ftd2);
   for(let d=1;d<=days;d++){
-    const isTD=isTochoDay(month,d);const td=document.createElement('td');td.className='taiki-name-cell';
-    if(!isTD){const ts=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='taiki');td.textContent=ts.map(n=>n.split(' ')[0]).join(' ');td.title=ts.join('、');}
+    const isTD=isTochoDay(curYM(),d);const td=document.createElement('td');td.className='taiki-name-cell';
+    if(!isTD){const ts=STAFF.filter(n=>schedData[curYM()][n]&&cellKey(schedData[curYM()][n][d-1])==='taiki');td.textContent=ts.map(n=>n.split(' ')[0]).join(' ');td.title=ts.join('、');}
     else{td.textContent='—';td.style.color='#a09e97';}
     ftr2.appendChild(td);
   }
@@ -1778,11 +1784,11 @@ function renderAdmin(){
   const ab=document.getElementById('alert-bar');const msgs=[];
   const uniqueC=[...new Set(conflicts)];const tochoAlert=[],taikiAlert=[];
   for(let d=1;d<=days;d++){
-    if(isTochoDay(month,d)){
-      const cnt=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='tocho').length;
+    if(isTochoDay(curYM(),d)){
+      const cnt=STAFF.filter(n=>schedData[curYM()][n]&&cellKey(schedData[curYM()][n][d-1])==='tocho').length;
       if(cnt<2)tochoAlert.push(`${d}日(${cnt}名)`);
     } else if(!isSat(year,month,d)&&!isSun(year,month,d)&&!hols.has(d)){
-      const cnt=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='taiki').length;
+      const cnt=STAFF.filter(n=>schedData[curYM()][n]&&cellKey(schedData[curYM()][n][d-1])==='taiki').length;
       if(cnt<1)taikiAlert.push(d+'日');
     }
   }
@@ -1794,7 +1800,7 @@ function renderAdmin(){
   const wishOverDays=[];
   for(let d=1;d<=days;d++){
     if(isSat(year,month,d)||isSun(year,month,d)||hols.has(d))continue;
-    const cnt=STAFF.filter(n=>staffData[n]?.[month]?.[d]?.wish).length;
+    const cnt=STAFF.filter(n=>staffData[n]?.[curYM()]?.[d]?.wish).length;
     if(cnt>dayLimit)wishOverDays.push(`${d}日(${cnt}名)`);
   }
   if(wishOverDays.length)msgs.push(`希望休 上限超過(平日${dayLimit}名まで): ${wishOverDays.join('・')}`);
@@ -1805,7 +1811,7 @@ function renderAdmin(){
     if(nk.hourUsed>nk.hourLimit)hourOverStaff.push(`${name.split(' ')[0]}(${nk.hourUsed}h)`);
     // 1日3h超過チェック
     for(let d=1;d<=days;d++){
-      const cell=schedData[month][name]?.[d-1];
+      const cell=schedData[curYM()][name]?.[d-1];
       const h=cellHour(cell);
       if(h>3)hourDayOverList.push(`${name.split(' ')[0]} ${month}/${d}日(${h}h)`);
     }
@@ -1815,9 +1821,9 @@ function renderAdmin(){
   if(msgs.length){ab.innerHTML=msgs.join('<br>');ab.classList.add('on');}else ab.classList.remove('on');
 
   const bar=document.getElementById('stat-bar');bar.innerHTML='';
-  const totalTocho=STAFF.reduce((a,n)=>a+(schedData[month][n]?schedData[month][n].filter(c=>cellKey(c)==='tocho').length:0),0);
-  const wishCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[month]||{}).filter(v=>v.wish).length,0);
-  const kibouCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[month]||{}).filter(v=>v.kibou).length,0);
+  const totalTocho=STAFF.reduce((a,n)=>a+(schedData[curYM()][n]?schedData[curYM()][n].filter(c=>cellKey(c)==='tocho').length:0),0);
+  const wishCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[curYM()]||{}).filter(v=>v.wish).length,0);
+  const kibouCnt=STAFF.reduce((a,n)=>a+Object.values(staffData[n]?.[curYM()]||{}).filter(v=>v.kibou).length,0);
   [{label:'当直計',val:totalTocho,sub:'今月',col:'#991b1b'},
    {label:'希望休',val:wishCnt,sub:'件',col:'#854d0e'},
    {label:'希望勤務',val:kibouCnt,sub:'件',col:'#166534'},
@@ -1830,40 +1836,40 @@ function renderAdmin(){
 }
 
 function toggleConfirmMonth(){
-  const isConfirmed=!!confirmedMonths[month];
-  const m=month;
+  const k=curYM(),m=month;
+  const isConfirmed=!!confirmedMonths[k];
   let newValue;
   if(!isConfirmed){
     if(!confirm(`${m}月の勤務表を確定します。\n各スタッフの「希望入力」カレンダーに確定した勤務が表示されるようになります。\n\nよろしいですか？`))return;
-    confirmedMonths[m]=true; newValue=true;
+    confirmedMonths[k]=true; newValue=true;
   } else {
     if(!confirm(`${m}月の確定を解除しますか？\n「希望入力」カレンダーの勤務表示が消えます。`))return;
-    delete confirmedMonths[m]; newValue=false;
+    delete confirmedMonths[k]; newValue=false;
   }
   renderAdmin();
   // confirmedMonthsは専用パスに直接書き込む（saveAll()の全体上書きに巻き込まれないようにするため）
-  if(typeof window._fbSetConfirmedMonth==='function') window._fbSetConfirmedMonth(m,newValue);
+  if(typeof window._fbSetConfirmedMonth==='function') window._fbSetConfirmedMonth(k,newValue);
 }
 function resetMonth(){
   if(!confirm(`${month}月の勤務割り当てをリセットします。\n希望休・希望勤務・勤務条件のデータは保持されます。\n\nよろしいですか？`))return;
   const days=daysInMonth(year,month);
   STAFF.forEach(name=>{
-    schedData[month][name]=[];
+    schedData[curYM()][name]=[];
     for(let d=1;d<=days;d++){
-      const dd=staffData[name]?.[month]?.[d]||{};
+      const dd=staffData[name]?.[curYM()]?.[d]||{};
       let k;
       if(dd.wish)k='shukyu';
       else if(isSat(year,month,d)||isSun(year,month,d)||isHol(year,month,d))k='shukyu';
       else k='nikkn';
-      schedData[month][name].push({k,h:0});
+      schedData[curYM()][name].push({k,h:0});
     }
   });
-  saveSchedScoped(STAFF.map(name=>[month,name]));renderAdmin();
+  saveSchedScoped(STAFF.map(name=>[curYM(),name]));renderAdmin();
 }
 
 function exportExcel(){
   if(typeof ExcelJS==='undefined'){alert('ExcelJSの読み込みに失敗しました。インターネット接続を確認してください。');return;}
-  ensureSchedule(month);
+  ensureSchedule(curYM());
   const days=daysInMonth(year,month);
   const hols=getHolidays(year,month);
 
@@ -1913,7 +1919,7 @@ function exportExcel(){
   hdrRow.getCell(1).value='氏名';
   hdrRow.getCell(1).style=makeStyle('#f0efe9','#6b6860',true,'center');
   for(let d=1;d<=days;d++){
-    const isTD=isTochoDay(month,d),isH=hols.has(d),isS=isSat(year,month,d),isSn=isSun(year,month,d);
+    const isTD=isTochoDay(curYM(),d),isH=hols.has(d),isS=isSat(year,month,d),isSn=isSun(year,month,d);
     const bg=isTD?'#ffedd5':isH?'#fff3cd':isS?'#dbeafe':isSn?'#fee2e2':'#f0efe9';
     const fg=isTD?'#c2410c':isH?'#b45309':isS?'#1e40af':isSn?'#991b1b':'#6b6860';
     const cell=hdrRow.getCell(1+d);
@@ -1941,7 +1947,7 @@ function exportExcel(){
 
     // 勤務セル
     for(let d=1;d<=days;d++){
-      const cell=(schedData[month][name]&&schedData[month][name][d-1])||{k:'empty',h:0};
+      const cell=(schedData[curYM()][name]&&schedData[curYM()][name][d-1])||{k:'empty',h:0};
       const k=cellKey(cell);const h=cellHour(cell);
       const sh=shiftByKey(k);
       const xcell=row.getCell(1+d);
@@ -2003,8 +2009,8 @@ function exportExcel(){
   tochoRow.getCell(1).value='当直数';
   tochoRow.getCell(1).style=makeStyle('#f0efe9','#57534e',true,'left');
   for(let d=1;d<=days;d++){
-    const isTD=isTochoDay(month,d);
-    const cnt=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='tocho').length;
+    const isTD=isTochoDay(curYM(),d);
+    const cnt=STAFF.filter(n=>schedData[curYM()][n]&&cellKey(schedData[curYM()][n][d-1])==='tocho').length;
     const cell=tochoRow.getCell(1+d);
     if(isTD){
       cell.value=cnt;
@@ -2024,8 +2030,8 @@ function exportExcel(){
   taikiRow.getCell(1).style=makeStyle('#f0fdf4','#166634',true,'left');
   for(let d=1;d<=days;d++){
     const cell=taikiRow.getCell(1+d);
-    if(!isTochoDay(month,d)){
-      const ts=STAFF.filter(n=>schedData[month][n]&&cellKey(schedData[month][n][d-1])==='taiki');
+    if(!isTochoDay(curYM(),d)){
+      const ts=STAFF.filter(n=>schedData[curYM()][n]&&cellKey(schedData[curYM()][n][d-1])==='taiki');
       cell.value=ts.map(n=>n.split(' ')[0]).join(' ');
     } else {cell.value='';}
     cell.style=makeStyle('#f0fdf4','#166634',false,'center');
@@ -2041,7 +2047,7 @@ function exportExcel(){
   }).catch(e=>{alert('Excel出力に失敗しました: '+e.message);});
 }
 function openPicker(name,d,td,e){
-  const dd=staffData[name]?.[month]?.[d]||{};
+  const dd=staffData[name]?.[curYM()]?.[d]||{};
   const ngSet=dd.ng||new Set();
   const info=document.getElementById('pk-info');
   const dow=DOW[getDow(year,month,d)];
@@ -2059,7 +2065,7 @@ function openPicker(name,d,td,e){
     shiftsEl.appendChild(btn);
   });
   // 時間年休セクション（固定コンテナの中身を毎回上書き。要素を追加し続けない）
-  const curCell=schedData[month]?.[name]?.[d-1]||{k:'empty',h:0};
+  const curCell=schedData[curYM()]?.[name]?.[d-1]||{k:'empty',h:0};
   const curH=cellHour(curCell);
   const nk=calcNenkyu(name);
   const hourOver=nk.hourUsed>nk.hourLimit;
@@ -2083,24 +2089,24 @@ function openPicker(name,d,td,e){
 }
 function closePicker(){document.getElementById('pk-overlay').classList.remove('on');}
 function assignShift(name,d,k){
-  if(!schedData[month])schedData[month]={};ensureSchedule(month);
-  const curH=cellHour(schedData[month][name][d-1]);
-  schedData[month][name][d-1]={k,h:curH};
+  if(!schedData[curYM()])schedData[curYM()]={};ensureSchedule(curYM());
+  const curH=cellHour(schedData[curYM()][name][d-1]);
+  schedData[curYM()][name][d-1]={k,h:curH};
   let spilloverMonth=null;
   if(k==='tocho'&&cfg.autoAke){
     const days=daysInMonth(year,month);
-    if(d<days){schedData[month][name][d]={k:'ake',h:0};}
-    else{const nm=month===12?1:month+1;ensureSchedule(nm);if(schedData[nm][name]){schedData[nm][name][0]={k:'ake',h:0};spilloverMonth=nm;}}
+    if(d<days){schedData[curYM()][name][d]={k:'ake',h:0};}
+    else{const nm=ymAdd(curYM(),1);ensureSchedule(nm);if(schedData[nm][name]){schedData[nm][name][0]={k:'ake',h:0};spilloverMonth=nm;}}
   }
-  const entries=[[month,name]];
+  const entries=[[curYM(),name]];
   if(spilloverMonth)entries.push([spilloverMonth,name]);
   saveSchedScoped(entries);
 }
 function assignHour(name,d,h){
-  if(!schedData[month])schedData[month]={};ensureSchedule(month);
-  const curK=cellKey(schedData[month][name][d-1]);
-  schedData[month][name][d-1]={k:curK,h};
-  saveSchedScoped([[month,name]]);
+  if(!schedData[curYM()])schedData[curYM()]={};ensureSchedule(curYM());
+  const curK=cellKey(schedData[curYM()][name][d-1]);
+  schedData[curYM()][name][d-1]={k:curK,h};
+  saveSchedScoped([[curYM(),name]]);
 }
 
 /* ══ SETTINGS ══ */
@@ -2170,7 +2176,7 @@ function addStaff(){
   const inp=document.getElementById('add-staff-inp');const name=inp.value.trim();if(!name)return;
   if(STAFF.includes(name)){alert('同じ名前のスタッフがすでにいます');return;}
   STAFF.push(name);if(!staffData[name])staffData[name]={};if(!nenkyuData[name])nenkyuData[name]={grant:0,carry:0};
-  Object.keys(schedData).forEach(m=>{if(!schedData[m][name]){const days=daysInMonth(year,+m);schedData[m][name]=[];for(let d=1;d<=days;d++)schedData[m][name].push({k:(isSat(year,+m,d)||isSun(year,+m,d))?'shukyu':'nikkn',h:0});}});
+  Object.keys(schedData).forEach(k=>ensureSchedule(+k));
   inp.value='';saveAll();saveSchedScoped(Object.keys(schedData).map(m=>[+m,name]));rebuildStaffSelect();renderStaffMgr();
 }
 function removeStaff(i){
@@ -2180,13 +2186,12 @@ function removeStaff(i){
   delete staffData[name];
   delete nenkyuData[name];
   Object.keys(schedData).forEach(m=>delete schedData[m][name]);
-  Object.keys(schedYear).forEach(m=>delete schedYear[m][name]);
   // 紐付けも削除
   Object.keys(staffLinks).forEach(uid=>{if(staffLinks[uid]===name)delete staffLinks[uid];});
   saveAll();
   // 消した人の分だけ消す（全体の上書きはしない）
-  const rmPaths={['staffData/'+name]:null};
-  Object.keys(schedData).forEach(m=>{rmPaths['schedData/'+m+'/'+name]=null;rmPaths['schedYear/'+m+'/'+name]=null;});
+  const rmPaths={['staffYM/'+name]:null};
+  Object.keys(schedData).forEach(m=>{rmPaths['schedYM/'+m+'/'+name]=null;});
   window._fbUpdatePaths(rmPaths);
   rebuildStaffSelect();renderStaffMgr();
 }
@@ -2369,7 +2374,7 @@ function deleteMskYear(){
 /* ── Tocho Cal ── */
 function renderTochoCal(){
   document.getElementById('tc-month-label').textContent=`${year}年${month}月`;
-  if(!tochoDays[month])tochoDays[month]=new Set();
+  if(!tochoDays[curYM()])tochoDays[curYM()]=new Set();
   const grid=document.getElementById('tc-cal');grid.innerHTML='';
   const fd=firstDow(year,month),days=daysInMonth(year,month);
   const hols=getHolidays(year,month);
@@ -2377,12 +2382,12 @@ function renderTochoCal(){
   for(let d=1;d<=days;d++){
     const cell=document.createElement('div');
     const isHolOrSun=hols.has(d)||isSun(year,month,d);
-    cell.className='tc-cell'+(isSat(year,month,d)?' sat':hols.has(d)?' hol':isSun(year,month,d)?' sun':'')+(tochoDays[month].has(d)?' tocho':'');
+    cell.className='tc-cell'+(isSat(year,month,d)?' sat':hols.has(d)?' hol':isSun(year,month,d)?' sun':'')+(tochoDays[curYM()].has(d)?' tocho':'');
     cell.textContent=d;
-    cell.onclick=()=>{if(tochoDays[month].has(d))tochoDays[month].delete(d);else tochoDays[month].add(d);saveAll();renderTochoCal();if(document.getElementById('scr-admin').classList.contains('on'))renderAdmin();};
+    cell.onclick=()=>{if(tochoDays[curYM()].has(d))tochoDays[curYM()].delete(d);else tochoDays[curYM()].add(d);saveAll();renderTochoCal();if(document.getElementById('scr-admin').classList.contains('on'))renderAdmin();};
     grid.appendChild(cell);
   }
-  const arr=[...tochoDays[month]].sort((a,b)=>a-b);
+  const arr=[...tochoDays[curYM()]].sort((a,b)=>a-b);
   document.getElementById('tc-days-label').textContent=arr.length?arr.map(d=>d+'日').join('・'):'なし';
 }
 
@@ -2462,7 +2467,7 @@ async function updateNenkyu(){
     +`・前年度の本年度付与の未使用分（上限${NENKYU_CARRY_LIMIT}日）が前年度繰越になります\n`
     +`・古い前年度繰越の残りは繰り越されません\n`
     +`・本年度付与は0に戻ります（更新後に入力してください）\n`
-    +`・${curFY}年度の勤務は新年度の集計に入りません（今月・来月に入力済みの分は新年度に数えます）\n\n`
+    +`・${curFY}年度の勤務は新年度の集計に入りません\n\n`
     +`【前年度繰越の更新】\n${lines.join('\n')}`,true))return;
 
   plan.forEach(p=>{
@@ -2470,32 +2475,11 @@ async function updateNenkyu(){
     nenkyuData[p.name].carry=p.carry;
     nenkyuData[p.name].grant=0;
   });
-  const paths=markOldSchedYears(newFY,today);
   nenkyuFY=newFY;
-  paths['nenkyuFY']=newFY;
   saveAll(); // 前年度繰越・本年度付与（nenkyuData）を保存
-  if(typeof window._fbUpdatePaths==='function')window._fbUpdatePaths(paths); // 年度と勤務データの印を専用に保存
+  if(typeof window._fbUpdatePaths==='function')window._fbUpdatePaths({nenkyuFY:newFY}); // 年度は専用に保存
   renderNenkyuPanel();
   await askDialog(`${newFY}年度に更新しました。\n${newFY}年度の本年度付与日数を入力してください。`,false);
-}
-// 更新前の勤務データ（年の印がないもの）に「何年分か」の印を付け、保存用のパスを返す。
-// 新年度の10月から数えて「今月の次の月」までは新年度分、それより先の月は前年度の古いデータとして扱う
-function markOldSchedYears(newFY,today){
-  const paths={};
-  const startIdx=newFY*12+10;
-  const todayIdx=today.getFullYear()*12+today.getMonth()+1-startIdx;
-  STAFF.forEach(name=>{
-    Object.keys(schedData).forEach(key=>{
-      const mm=+key;
-      if(!schedData[mm]?.[name]||schedYear[mm]?.[name]!==undefined)return;
-      const yNew=calendarYearInFY(newFY,mm);
-      const yr=(yNew*12+mm-startIdx)<=todayIdx+1?yNew:yNew-1;
-      if(!schedYear[mm])schedYear[mm]={};
-      schedYear[mm][name]=yr;
-      paths['schedYear/'+mm+'/'+name]=yr;
-    });
-  });
-  return paths;
 }
 // すでに「有給を更新する」を押して新年度の有給を入力済みの場合に、年度の扱いだけを新年度へ切り替える
 // （前年度繰越・本年度付与の数字は一切変えない）
@@ -2509,12 +2493,10 @@ async function switchNenkyuYearOnly(){
   }
   if(!await askDialog(`有給の年度を${newFY}年度（${newFY}年10月〜${newFY+1}年9月）に切り替えます。\n\n`
     +`・前年度繰越・本年度付与の数字は変わりません\n`
-    +`・${curFY}年度の勤務は、有給の消化日数・時間年休の集計に入らなくなります（今月・来月に入力済みの分は新年度に数えます）\n\n`
+    +`・${curFY}年度の勤務は、有給の消化日数・時間年休の集計に入らなくなります\n\n`
     +`すでに「有給を更新する」を押して新年度の有給を入力済みの場合に使います。まだの場合は「有給を更新する」を押してください。`,true))return;
-  const paths=markOldSchedYears(newFY,today);
   nenkyuFY=newFY;
-  paths['nenkyuFY']=newFY;
-  if(typeof window._fbUpdatePaths==='function')window._fbUpdatePaths(paths);
+  if(typeof window._fbUpdatePaths==='function')window._fbUpdatePaths({nenkyuFY:newFY});
   renderNenkyuPanel();
   await askDialog(`${newFY}年度に切り替えました。`,false);
 }
@@ -2528,11 +2510,11 @@ function initAll(){
   document.getElementById('month-label').textContent=`${year}年 ${month}月`;
   document.getElementById('logo-text').innerHTML=cfg.title+'<span id="logo-sub"> 勤務表</span>';
   STAFF.forEach(n=>{if(!staffData[n])staffData[n]={};if(!nenkyuData[n])nenkyuData[n]={grant:0,carry:0,hourLimit:16};});
-  if(!tochoDays[month])tochoDays[month]=new Set();
+  if(!tochoDays[curYM()])tochoDays[curYM()]=new Set();
   getShukyuKijunYear(year); // 現在年のデータがなければ初期化
-  ensureSchedule(month);
+  ensureSchedule(curYM());
   if(icsSelShifts.size===0)['tocho','ake','taiki','hayade'].forEach(k=>icsSelShifts.add(k));
-  if(icsSelMonths.size===0)icsSelMonths.add(month);
+  if(icsSelMonths.size===0)icsSelMonths.add(curYM());
   rebuildStaffSelect();renderStaffCal();renderSummary();renderYkCard();renderICS();
   updateLinkBtn();
   document.getElementById('cfg-title').value=cfg.title;
